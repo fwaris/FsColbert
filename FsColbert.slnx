@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/FsColbert/FsColbert.fsproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FsColbert.Tests/FsColbert.Tests.fsproj" />
+  </Folder>
+</Solution>

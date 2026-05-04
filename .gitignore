@@ -1,0 +1,9 @@
+bin/
+obj/
+.ionide/
+.idea/
+.vs/
+
+*.user
+*.suo
+*.fsci
