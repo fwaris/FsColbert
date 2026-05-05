@@ -106,27 +106,59 @@ module Search =
     let private candidatePassages options (index: ColbertIndex) queryText searchTerms =
         let passages = index.passages |> List.toArray
 
-        Tfidf.scoreQueryWithSearchTerms index.tfidf queryText searchTerms
-        |> Tfidf.topCandidates options.candidateLimit
-        |> Array.choose (fun (ordinal, lexicalScore) ->
-            if ordinal >= 0 && ordinal < passages.Length then
-                Some(passages[ordinal], lexicalScore)
-            else
-                None)
-        |> Array.toList
+        if options.useLexicalFilter then
+            Tfidf.scoreQueryWithSearchTerms index.tfidf queryText searchTerms
+            |> Tfidf.topCandidates options.candidateLimit
+            |> Array.choose (fun (ordinal, lexicalScore) ->
+                if ordinal >= 0 && ordinal < passages.Length then
+                    Some(passages[ordinal], lexicalScore)
+                else
+                    None)
+            |> Array.toList
+        else
+            passages |> Array.map (fun p -> p, 0.0f) |> Array.toList
+
+    let private reciprocalRankFusion k denseWeight lexicalWeight (hits: SearchHit list) =
+        let denseRank = 
+            hits 
+            |> List.sortByDescending (fun h -> h.denseScore) 
+            |> List.mapi (fun i h -> h.reference, i + 1)
+            |> Map.ofList
+
+        let lexicalRank = 
+            hits 
+            |> List.sortByDescending (fun h -> h.lexicalScore) 
+            |> List.mapi (fun i h -> h.reference, i + 1)
+            |> Map.ofList
+
+        hits |> List.map (fun h ->
+            let rDense = Map.find h.reference denseRank
+            let rLexical = Map.find h.reference lexicalRank
+            let score = 
+                denseWeight * (1.0f / (float32 k + float32 rDense)) + 
+                lexicalWeight * (1.0f / (float32 k + float32 rLexical))
+            { h with score = score }
+        )
 
     let private rankCandidates options queryEmbedding candidates =
-        candidates
-        |> List.map (fun (passage, lexicalScore) ->
-            let denseScore = Scoring.maxSim queryEmbedding passage.embedding
+        let rawHits = 
+            candidates
+            |> List.map (fun (passage, lexicalScore) ->
+                let denseScore = Scoring.maxSim queryEmbedding passage.embedding
+                let score = Scoring.combinedScore options.denseWeight options.lexicalWeight denseScore lexicalScore
 
-            let score =
-                Scoring.combinedScore options.denseWeight options.lexicalWeight denseScore lexicalScore
+                { reference = passage.reference
+                  denseScore = denseScore
+                  lexicalScore = lexicalScore
+                  score = score })
 
-            { reference = passage.reference
-              denseScore = denseScore
-              lexicalScore = lexicalScore
-              score = score })
+        let hits = 
+            if options.useRRF then
+                reciprocalRankFusion options.fusionK options.denseWeight options.lexicalWeight rawHits
+            else
+                rawHits
+
+        hits
         |> List.sortByDescending (fun hit -> hit.score, hit.denseScore)
         |> List.truncate (max 0 options.maxResults)
 

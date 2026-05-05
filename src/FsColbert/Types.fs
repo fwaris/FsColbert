@@ -165,14 +165,20 @@ type SearchOptions =
     { maxResults: int
       candidateLimit: int
       denseWeight: float32
-      lexicalWeight: float32 }
+      lexicalWeight: float32
+      useLexicalFilter: bool
+      useRRF: bool
+      fusionK: int }
 
 module SearchOptions =
     let defaults =
         { maxResults = 6
           candidateLimit = 128
           denseWeight = 1.0f
-          lexicalWeight = 0.15f }
+          lexicalWeight = 0.15f
+          useLexicalFilter = true
+          useRRF = true
+          fusionK = 60 }
 
 type SearchHit =
     { reference: PassageRef
