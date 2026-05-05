@@ -83,6 +83,12 @@ let ``passagesFromBlocks emits bounded section-aware passages`` () =
     Assert.Equal("Paper", passages.Head.sourceDisplayName)
 
 [<Fact>]
+let ``section matching tolerates small spelling mistakes`` () =
+    Assert.True(DocumentSections.matches "abtract" "ABSTRACT")
+    Assert.True(DocumentSections.matches "intrduction" "INTRODUCTION")
+    Assert.False(DocumentSections.matches "results" "REFERENCES")
+
+[<Fact>]
 let ``termFrequencies counts repeated terms`` () =
     let frequencies, total = Text.termFrequencies "Apple apple banana."
 

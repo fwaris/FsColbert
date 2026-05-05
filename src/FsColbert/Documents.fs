@@ -3,6 +3,7 @@ namespace FsColbert
 open System
 open System.IO
 open System.Text.RegularExpressions
+open F23.StringSimilarity
 open UglyToad.PdfPig
 open UglyToad.PdfPig.Content
 open UglyToad.PdfPig.DocumentLayoutAnalysis.PageSegmenter
@@ -21,6 +22,8 @@ module PassageSource =
 
 module DocumentSections =
     let sectionPrefix = "Section:"
+
+    let private levenshtein = Levenshtein()
 
     let private headingTerms =
         [ "abstract"
@@ -101,8 +104,22 @@ module DocumentSections =
         |> Text.normalizeWhitespace
         |> fun text -> text.ToLowerInvariant()
 
+    let private maxEditDistance length =
+        if length <= 6 then 1
+        elif length <= 12 then 2
+        else 3
+
+    let private nearlyMatches requested heading =
+        let requestedName = normalizedName requested
+        let headingName = normalizedName heading
+
+        not (String.IsNullOrWhiteSpace requestedName)
+        && not (String.IsNullOrWhiteSpace headingName)
+        && levenshtein.Distance(requestedName, headingName) <= maxEditDistance (max requestedName.Length headingName.Length)
+
     let matches requested heading =
         String.Equals(normalizedName requested, normalizedName heading, StringComparison.Ordinal)
+        || nearlyMatches requested heading
 
 module DocumentChunking =
     let representationVersion = "pdf-section-aware-v2"
