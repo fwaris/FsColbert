@@ -11,6 +11,16 @@ module SourceDocuments =
     let fromFsKamePdf id displayName storedPath text selected =
         create id $"PDF: {displayName}" storedPath text selected
 
+    let createPreChunked id displayName location chunks enabled : PreChunkedDocument =
+        { id = id
+          displayName = displayName
+          location = location
+          chunks = chunks
+          enabled = enabled }
+
+    let fromFsKamePdfChunked id displayName storedPath chunks selected =
+        createPreChunked id $"PDF: {displayName}" storedPath chunks selected
+
 module SearchHits =
     let renderContext maxChars (hits: SearchHit list) =
         if List.isEmpty hits then

@@ -3,7 +3,7 @@ namespace FsColbert
 open System
 
 module IndexBuilder =
-    let private allPassages options sources =
+    let private allPassages options (sources: SourceDocument list) =
         sources |> List.filter _.enabled |> List.collect (Text.splitPassages options)
 
     let create
@@ -55,6 +55,52 @@ module IndexBuilder =
 
     let createWithDefaults encoder sources progress =
         create encoder ChunkOptions.fsKameDefaults sources progress
+
+    let createFromPassages
+        (encoder: OnnxColbertEncoder)
+        (chunkOptions: ChunkOptions)
+        (passages: PassageRef list)
+        (progress: (IndexProgress -> unit) option)
+        =
+        async {
+            let total = passages.Length
+            let mutable completed = 0
+            let indexed = ResizeArray<IndexedPassage>()
+
+            for passage in passages do
+                progress
+                |> Option.iter (fun report ->
+                    report
+                        { completedPassages = completed
+                          totalPassages = total
+                          currentSource = Some passage.sourceDisplayName })
+
+                let! encoded = encoder.EncodeDocumentAsync passage.text
+
+                indexed.Add(
+                    { reference = passage
+                      embedding = encoded.embedding
+                      terms = Text.terms passage.text }
+                )
+
+                completed <- completed + 1
+
+            progress
+            |> Option.iter (fun report ->
+                report
+                    { completedPassages = completed
+                      totalPassages = total
+                      currentSource = None })
+
+            let indexed = indexed |> Seq.toList
+
+            return
+                { config = encoder.Config
+                  chunkOptions = chunkOptions
+                  passages = indexed
+                  tfidf = Tfidf.build indexed
+                  createdAt = DateTimeOffset.UtcNow }
+        }
 
 module Search =
     let private candidatePassages options (index: ColbertIndex) queryText searchTerms =

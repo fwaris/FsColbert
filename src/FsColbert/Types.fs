@@ -121,6 +121,13 @@ type SourceDocument =
       text: string
       enabled: bool }
 
+type PreChunkedDocument =
+    { id: string
+      displayName: string
+      location: string
+      chunks: string list
+      enabled: bool }
+
 type PassageRef =
     { sourceId: string
       sourceDisplayName: string

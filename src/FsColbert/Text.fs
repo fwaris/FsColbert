@@ -86,3 +86,12 @@ module Text =
               sourceLocation = source.location
               index = index
               text = text })
+
+    let passagesFromChunks (source: PreChunkedDocument) : PassageRef list =
+        source.chunks
+        |> List.mapi (fun index text ->
+            { sourceId = source.id
+              sourceDisplayName = source.displayName
+              sourceLocation = source.location
+              index = index
+              text = text })
