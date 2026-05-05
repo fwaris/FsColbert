@@ -41,6 +41,48 @@ let ``chunkText preserves overlap friendly chunks`` () =
     Assert.Equal("ijklmnopqr", chunks[1] |> snd)
 
 [<Fact>]
+let ``chunkSectionedBlocks keeps section heading with following body`` () =
+    let options =
+        { ChunkOptions.fsKameDefaults with
+            maxChars = 200
+            overlapChars = 20 }
+
+    let chunks =
+        DocumentChunking.chunkSectionedBlocks
+            options
+            [ "Title"
+              "ABSTRACT"
+              "This paper introduces a retrieval method for scientific documents."
+              "INTRODUCTION"
+              "The introduction motivates the problem." ]
+
+    Assert.True(
+        chunks
+        |> List.exists (fun chunk -> chunk.StartsWith("Section: ABSTRACT") && chunk.Contains("retrieval method"))
+    )
+
+[<Fact>]
+let ``passagesFromBlocks emits bounded section-aware passages`` () =
+    let options =
+        { ChunkOptions.fsKameDefaults with
+            maxChars = 80
+            overlapChars = 10
+            minChars = 1 }
+
+    let source = PassageSource.create "paper" "Paper" "/tmp/paper.pdf"
+
+    let passages =
+        DocumentChunking.passagesFromBlocks
+            options
+            source
+            [ "ABSTRACT"
+              "This abstract has enough text to require more than one small passage for indexing." ]
+
+    Assert.All(passages, fun passage -> Assert.True(passage.text.Length <= options.maxChars))
+    Assert.Equal("paper", passages.Head.sourceId)
+    Assert.Equal("Paper", passages.Head.sourceDisplayName)
+
+[<Fact>]
 let ``termFrequencies counts repeated terms`` () =
     let frequencies, total = Text.termFrequencies "Apple apple banana."
 

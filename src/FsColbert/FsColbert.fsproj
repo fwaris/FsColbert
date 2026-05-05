@@ -8,6 +8,7 @@
   <ItemGroup>
     <Compile Include="Types.fs" />
     <Compile Include="Text.fs" />
+    <Compile Include="Documents.fs" />
     <Compile Include="Tfidf.fs" />
     <Compile Include="ModelConfig.fs" />
     <Compile Include="Tokenizer.fs" />
@@ -23,6 +24,7 @@
     <PackageReference Include="FSharp.DI" Version="1.0.0" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.25.1" />
     <PackageReference Include="Microsoft.ML.Tokenizers" Version="2.0.0" />
+    <PackageReference Include="PdfPig" Version="0.1.14" />
   </ItemGroup>
 
 </Project>

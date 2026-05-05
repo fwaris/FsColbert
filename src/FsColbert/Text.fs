@@ -12,7 +12,10 @@ module Text =
         |> Seq.map _.Value
 
     let normalizeWhitespace (value: string) =
-        Regex.Replace(defaultArg (Option.ofObj value) "", @"\s+", " ").Trim()
+        let dehyphenated =
+            Regex.Replace(defaultArg (Option.ofObj value) "", @"(\p{L})-\s+(\p{Ll})", "$1$2")
+
+        Regex.Replace(dehyphenated, @"\s+", " ").Trim()
 
     let terms (value: string) =
         termMatches value |> Seq.distinct |> Set.ofSeq
