@@ -1,6 +1,7 @@
 module FsColbert.Tests
 
 open System
+open System.IO
 open FsColbert
 open Xunit
 
@@ -87,6 +88,44 @@ let ``section matching tolerates small spelling mistakes`` () =
     Assert.True(DocumentSections.matches "abtract" "ABSTRACT")
     Assert.True(DocumentSections.matches "intrduction" "INTRODUCTION")
     Assert.False(DocumentSections.matches "results" "REFERENCES")
+
+[<Fact>]
+let ``markdown passages preserve nested heading context`` () =
+    async {
+        let path = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.md")
+
+        do!
+            File.WriteAllTextAsync(
+                path,
+                "# Project Guide\n\nIntro paragraph.\n\n## Setup\n\nInstall the tool.\n\n### macOS\n\nRun the installer.\n\n- Open settings\n- Enable indexing\n"
+            )
+            |> Async.AwaitTask
+
+        try
+            let source = PassageSource.create "guide" "Guide" path
+            let! result = MarkdownDocuments.readPassages ChunkOptions.fsKameDefaults source path
+
+            match result with
+            | Error err -> failwith err
+            | Ok passages ->
+                Assert.Contains(
+                    passages,
+                    fun passage ->
+                        passage.text.StartsWith("Section: Project Guide > Setup > macOS")
+                        && passage.text.Contains("Run the installer")
+                )
+
+                Assert.Contains(
+                    passages,
+                    fun passage ->
+                        passage.text.StartsWith("Section: Project Guide > Setup > macOS")
+                        && passage.text.Contains("Enable indexing")
+                )
+        finally
+            if File.Exists path then
+                File.Delete path
+    }
+    |> Async.RunSynchronously
 
 [<Fact>]
 let ``termFrequencies counts repeated terms`` () =

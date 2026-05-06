@@ -124,7 +124,7 @@ module DocumentSections =
 module DocumentChunking =
     let representationVersion = "pdf-section-aware-v2"
 
-    type private DocumentSection =
+    type SectionBlocks =
         { heading: string option
           blocks: string list }
 
@@ -201,9 +201,8 @@ module DocumentChunking =
         else
             [ chunk ]
 
-    let chunkSectionedBlocks (options: ChunkOptions) (blocks: string list) =
-        blocks
-        |> splitIntoSections
+    let chunkSections (options: ChunkOptions) (sections: SectionBlocks list) =
+        sections
         |> List.collect (fun section ->
             section.blocks
             |> chunkBlocks options
@@ -212,9 +211,26 @@ module DocumentChunking =
                 |> DocumentSections.formatChunk section.heading
                 |> enforceChunkBounds options))
 
+    let chunkSectionedBlocks (options: ChunkOptions) (blocks: string list) =
+        blocks |> splitIntoSections |> chunkSections options
+
     let passagesFromBlocks (options: ChunkOptions) (source: PassageSource) (blocks: string list) : PassageRef list =
         blocks
         |> chunkSectionedBlocks options
+        |> List.mapi (fun index text ->
+            { sourceId = source.id
+              sourceDisplayName = source.displayName
+              sourceLocation = source.location
+              index = index
+              text = text })
+
+    let passagesFromSections
+        (options: ChunkOptions)
+        (source: PassageSource)
+        (sections: SectionBlocks list)
+        : PassageRef list =
+        sections
+        |> chunkSections options
         |> List.mapi (fun index text ->
             { sourceId = source.id
               sourceDisplayName = source.displayName
@@ -302,3 +318,188 @@ module PdfDocuments =
 
     let readPassages chunkOptions source path =
         readPassagesWithOptions PdfReadOptions.defaults chunkOptions source path
+
+module MarkdownDocuments =
+    let private headingPattern = Regex(@"^(#{1,6})\s+(.+?)\s*#*\s*$", RegexOptions.Compiled)
+    let private unorderedListPattern = Regex(@"^\s*[-+*]\s+", RegexOptions.Compiled)
+    let private orderedListPattern = Regex(@"^\s*\d+[.)]\s+", RegexOptions.Compiled)
+
+    let private normalizeLine (line: string) =
+        line.Replace("\t", "    ").TrimEnd()
+
+    let private stripInlineMarkup (text: string) =
+        text
+        |> fun value -> Regex.Replace(value, @"`([^`]+)`", "$1")
+        |> fun value -> Regex.Replace(value, @"\*\*([^*]+)\*\*", "$1")
+        |> fun value -> Regex.Replace(value, @"__([^_]+)__", "$1")
+        |> fun value -> Regex.Replace(value, @"\*([^*]+)\*", "$1")
+        |> fun value -> Regex.Replace(value, @"_([^_]+)_", "$1")
+        |> fun value -> Regex.Replace(value, @"\[(.*?)\]\([^)]+\)", "$1")
+        |> Text.normalizeWhitespace
+
+    let private tryHeading (line: string) =
+        let m = headingPattern.Match(line.Trim())
+
+        if m.Success then
+            let level = m.Groups[1].Value.Length
+            let heading = stripInlineMarkup m.Groups[2].Value
+
+            if String.IsNullOrWhiteSpace heading then
+                None
+            else
+                Some(level, heading)
+        else
+            None
+
+    let private isFence (line: string) =
+        let trimmed = line.TrimStart()
+        trimmed.StartsWith("```", StringComparison.Ordinal) || trimmed.StartsWith("~~~", StringComparison.Ordinal)
+
+    let private isListLine (line: string) =
+        unorderedListPattern.IsMatch(line) || orderedListPattern.IsMatch(line)
+
+    let private isTableLine (line: string) =
+        let trimmed = line.Trim()
+        trimmed.StartsWith("|", StringComparison.Ordinal) && trimmed.EndsWith("|", StringComparison.Ordinal)
+
+    let private addBlock lines blocks =
+        match lines with
+        | [] -> blocks
+        | _ ->
+            let block =
+                lines
+                |> List.rev
+                |> String.concat "\n"
+                |> Text.normalizeWhitespace
+
+            if String.IsNullOrWhiteSpace block then
+                blocks
+            else
+                block :: blocks
+
+    let private headingPath (stack: (int * string) list) =
+        let path =
+            stack
+            |> List.sortBy fst
+            |> List.map snd
+            |> String.concat " > "
+
+        if String.IsNullOrWhiteSpace path then
+            None
+        else
+            Some path
+
+    let readSections path : Async<Result<DocumentChunking.SectionBlocks list, string>> =
+        async {
+            if not (File.Exists path) then
+                return Error $"Markdown file not found: {path}"
+            else
+                try
+                    let! text = File.ReadAllTextAsync(path) |> Async.AwaitTask
+
+                    let lines =
+                        text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n')
+                        |> Array.toList
+                        |> List.map normalizeLine
+
+                    let rec skipFrontMatter (remaining: string list) =
+                        match remaining with
+                        | first :: rest when first.Trim() = "---" ->
+                            rest
+                            |> List.skipWhile (fun line -> line.Trim() <> "---")
+                            |> function
+                                | _closing :: tail -> tail
+                                | [] -> remaining
+                        | _ -> remaining
+
+                    let addSection
+                        (stack: (int * string) list)
+                        blockLines
+                        (sections: DocumentChunking.SectionBlocks list)
+                        =
+                        let blocks = addBlock blockLines []
+
+                        if List.isEmpty blocks then
+                            sections
+                        else
+                            { heading = headingPath stack
+                              blocks = List.rev blocks }
+                            :: sections
+
+                    let rec loop
+                        (remaining: string list)
+                        (stack: (int * string) list)
+                        blockLines
+                        (sections: DocumentChunking.SectionBlocks list)
+                        inFence
+                        =
+                        match remaining with
+                        | [] -> addSection stack blockLines sections |> List.rev
+                        | line :: rest when inFence ->
+                            let blockLines = line :: blockLines
+                            loop rest stack blockLines sections (not (isFence line))
+                        | line :: rest when isFence line ->
+                            loop rest stack (line :: blockLines) sections true
+                        | line :: rest ->
+                            match tryHeading line with
+                            | Some(level, heading) ->
+                                let sections = addSection stack blockLines sections
+
+                                let stack =
+                                    stack
+                                    |> List.filter (fun (existingLevel, _) -> existingLevel < level)
+                                    |> fun parents -> (level, heading) :: parents
+
+                                loop rest stack [] sections false
+                            | None when String.IsNullOrWhiteSpace line ->
+                                let sections = addSection stack blockLines sections
+                                loop rest stack [] sections false
+                            | None when isListLine line || isTableLine line ->
+                                let rec collectRelated collected remaining =
+                                    match remaining with
+                                    | next :: tail when
+                                        String.IsNullOrWhiteSpace next
+                                        || isListLine next
+                                        || isTableLine next
+                                        || next.StartsWith("  ", StringComparison.Ordinal)
+                                        ->
+                                        collectRelated (next :: collected) tail
+                                    | _ -> List.rev collected, remaining
+
+                                let related, remaining = collectRelated [ line ] rest
+                                let sections = addSection stack (List.rev related) sections
+                                loop remaining stack [] sections false
+                            | None -> loop rest stack (line :: blockLines) sections false
+
+                    let sections = loop (skipFrontMatter lines) [] [] [] false
+
+                    return Ok sections
+                with ex ->
+                    return Error $"Unable to read Markdown file '{path}': {ex.Message}"
+        }
+
+    let readBlocks path =
+        async {
+            let! result = readSections path
+
+            return
+                result
+                |> Result.map (fun sections ->
+                    sections
+                    |> List.collect (fun section ->
+                        match section.heading with
+                        | Some heading -> heading :: section.blocks
+                        | None -> section.blocks))
+        }
+
+    let readText path =
+        async {
+            let! result = readBlocks path
+            return result |> Result.map (String.concat "\n\n")
+        }
+
+    let readPassages chunkOptions source path =
+        async {
+            let! result = readSections path
+            return result |> Result.map (DocumentChunking.passagesFromSections chunkOptions source)
+        }
