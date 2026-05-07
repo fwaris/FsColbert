@@ -5,6 +5,18 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <PackageId>FsColbert</PackageId>
+    <Description>Mobile-friendly F#/.NET ColBERT-style retrieval with ONNX Runtime and local index persistence.</Description>
+    <Authors>Faisal Waris</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageTags>FSharp;ColBERT;Retrieval;ONNX;AI;Search</PackageTags>
+    <PackageProjectUrl>https://github.com/fwaris/FsColbert</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/fwaris/FsColbert</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
   <ItemGroup>
     <Compile Include="Types.fs" />
     <Compile Include="Text.fs" />
@@ -18,6 +30,7 @@
     <Compile Include="Persistence.fs" />
     <Compile Include="ModelCatalog.fs" />
     <Compile Include="Integration.fs" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
   <ItemGroup>

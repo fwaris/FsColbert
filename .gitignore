@@ -1,5 +1,6 @@
 bin/
 obj/
+artifacts/
 .ionide/
 .idea/
 .vs/
