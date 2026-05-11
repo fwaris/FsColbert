@@ -222,7 +222,8 @@ module DocumentChunking =
               sourceDisplayName = source.displayName
               sourceLocation = source.location
               index = index
-              text = text })
+              text = text
+              keywords = [] })
 
     let passagesFromSections
         (options: ChunkOptions)
@@ -236,7 +237,8 @@ module DocumentChunking =
               sourceDisplayName = source.displayName
               sourceLocation = source.location
               index = index
-              text = text })
+              text = text
+              keywords = [] })
 
 type PdfReadOptions =
     { includeImageNotes: bool

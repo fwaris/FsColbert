@@ -5,7 +5,7 @@ open System.Collections.Frozen
 
 module Log =
     type FsColbertLog = class end
-    let log = FSharp.DI.DI.loggerLazy<FsColbertLog>()
+    let log = FSharp.DI.DI.loggerLazy<FsColbertLog> ()
 
 type EncoderMode =
     | Query
@@ -133,12 +133,73 @@ type PassageRef =
       sourceDisplayName: string
       sourceLocation: string
       index: int
-      text: string }
+      text: string
+      keywords: string list }
+
+type PassageKeywordResult =
+    { sourceId: string
+      passageIndex: int
+      keywords: string list }
+
+type IPassageKeywordGenerator =
+    abstract GenerateKeywordsAsync: PassageRef list -> Async<PassageKeywordResult list>
+
+type KeywordElaborationOptions =
+    { generator: IPassageKeywordGenerator option
+      batchSize: int
+      maxDegreeOfParallelism: int
+      replaceExistingKeywords: bool
+      maxKeywordsPerPassage: int }
+
+module KeywordElaborationOptions =
+    let disabled =
+        { generator = None
+          batchSize = 4
+          maxDegreeOfParallelism = 2
+          replaceExistingKeywords = false
+          maxKeywordsPerPassage = 16 }
+
+    let withGenerator generator =
+        { disabled with
+            generator = Some generator }
+
+    let sanitize options =
+        { options with
+            batchSize = max 1 options.batchSize
+            maxDegreeOfParallelism = max 1 options.maxDegreeOfParallelism
+            maxKeywordsPerPassage = max 0 options.maxKeywordsPerPassage }
 
 type IndexedPassage =
     { reference: PassageRef
       embedding: MultiVector
       terms: Set<string> }
+
+type IndexingOptions =
+    { maxDegreeOfParallelism: int
+      batchSize: int }
+
+module IndexingOptions =
+    let private environmentInt name =
+        match Environment.GetEnvironmentVariable name with
+        | value when String.IsNullOrWhiteSpace value -> None
+        | value ->
+            match Int32.TryParse value with
+            | true, parsed when parsed > 0 -> Some parsed
+            | _ -> None
+
+    let private environmentParallelism () =
+        environmentInt "FSCOLBERT_INDEX_PARALLELISM"
+        |> Option.orElse (environmentInt "FSCOLBERT_MODEL_REPLICAS")
+
+    let defaults =
+        { maxDegreeOfParallelism =
+            environmentParallelism ()
+            |> Option.defaultValue (min 3 (max 1 Environment.ProcessorCount))
+          batchSize = environmentInt "FSCOLBERT_INDEX_BATCH_SIZE" |> Option.defaultValue 16 }
+
+    let sanitize options =
+        { maxDegreeOfParallelism = max 1 options.maxDegreeOfParallelism
+          batchSize = max 1 options.batchSize }
 
 type Posting =
     { passageOrdinal: int
@@ -154,9 +215,19 @@ type TfidfIndex =
       averageDocumentLength: float32
       vocabulary: FrozenDictionary<string, TermInfo> }
 
+type TfidfOptions =
+    { textWeight: float32
+      keywordWeight: float32 }
+
+module TfidfOptions =
+    let defaults =
+        { textWeight = 1.0f
+          keywordWeight = 3.0f }
+
 type ColbertIndex =
     { config: EncoderConfig
       chunkOptions: ChunkOptions
+      tfidfOptions: TfidfOptions
       passages: IndexedPassage list
       tfidf: TfidfIndex
       createdAt: DateTimeOffset }

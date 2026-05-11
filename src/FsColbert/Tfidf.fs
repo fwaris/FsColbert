@@ -7,6 +7,10 @@ module Tfidf =
     let private inverseDocumentFrequency passageCount documentFrequency =
         log ((1.0f + float32 passageCount) / (1.0f + float32 documentFrequency)) + 1.0f
 
+    let private sanitizeOptions options =
+        { textWeight = max 0.0f options.textWeight
+          keywordWeight = max 0.0f options.keywordWeight }
+
     let private normalizedFrequencies text =
         let frequencies, totalTerms = Text.termFrequencies text
 
@@ -18,21 +22,52 @@ module Tfidf =
 
         normalized, totalTerms
 
-    let build (passages: IndexedPassage list) =
+    let private addWeightedFrequencies weight frequencies acc =
+        if weight <= 0.0f then
+            acc
+        else
+            frequencies
+            |> Map.fold (fun acc term frequency ->
+                let weightedFrequency = weight * frequency
+
+                acc
+                |> Map.change term (fun existing ->
+                    Some(defaultArg existing 0.0f + weightedFrequency))) acc
+
+    let private lexicalFrequencies options (passage: IndexedPassage) =
+        let textFrequencies, textTerms = normalizedFrequencies passage.reference.text
+
+        let keywordFrequencies, keywordTerms =
+            passage.reference.keywords
+            |> String.concat " "
+            |> normalizedFrequencies
+
+        let frequencies =
+            Map.empty
+            |> addWeightedFrequencies options.textWeight textFrequencies
+            |> addWeightedFrequencies options.keywordWeight keywordFrequencies
+
+        let weightedLength =
+            float32 textTerms * options.textWeight + float32 keywordTerms * options.keywordWeight
+
+        frequencies, weightedLength
+
+    let buildWithOptions (options: TfidfOptions) (passages: IndexedPassage list) =
+        let options = sanitizeOptions options
         let passageCount = passages.Length
 
         let passageFrequencies =
             passages
             |> List.mapi (fun ordinal passage ->
-                let frequencies, totalTerms = normalizedFrequencies passage.reference.text
-                ordinal, frequencies, totalTerms)
+                let frequencies, documentLength = lexicalFrequencies options passage
+                ordinal, frequencies, documentLength)
 
         let averageDocumentLength =
             if passageCount = 0 then
                 0.0f
             else
                 passageFrequencies
-                |> List.averageBy (fun (_, _, totalTerms) -> float totalTerms)
+                |> List.averageBy (fun (_, _, documentLength) -> float documentLength)
                 |> float32
 
         let postingsByTerm =
@@ -64,6 +99,9 @@ module Tfidf =
         { passageCount = passageCount
           averageDocumentLength = averageDocumentLength
           vocabulary = vocabulary }
+
+    let build (passages: IndexedPassage list) =
+        buildWithOptions TfidfOptions.defaults passages
 
     let scoreValues (index: TfidfIndex) (values: string seq) =
         let queryFrequencies, queryLength = Text.termFrequenciesFromValues values

@@ -6,7 +6,8 @@ open System.IO
 
 module IndexPersistence =
     let private magic = "FSCOLBERT-IDX"
-    let private version = 2
+    let private version = 3
+    let private minimumReadableVersion = 2
 
     let private writeConfig (writer: BinaryWriter) (config: EncoderConfig) =
         writer.Write config.queryLength
@@ -87,6 +88,24 @@ module IndexPersistence =
           tokenCount = tokenCount
           embeddingDim = embeddingDim }
 
+    let private writeTfidfOptions (writer: BinaryWriter) (options: TfidfOptions) =
+        writer.Write options.textWeight
+        writer.Write options.keywordWeight
+
+    let private readTfidfOptions (reader: BinaryReader) =
+        { textWeight = reader.ReadSingle()
+          keywordWeight = reader.ReadSingle() }
+
+    let private writeStringList (writer: BinaryWriter) (values: string list) =
+        writer.Write values.Length
+
+        for value in values do
+            writer.Write value
+
+    let private readStringList (reader: BinaryReader) =
+        [ for _ = 1 to reader.ReadInt32() do
+              reader.ReadString() ]
+
     let private writeTfidf (writer: BinaryWriter) (index: TfidfIndex) =
         writer.Write index.passageCount
         writer.Write index.averageDocumentLength
@@ -141,6 +160,7 @@ module IndexPersistence =
         writer.Write index.chunkOptions.maxChars
         writer.Write index.chunkOptions.overlapChars
         writer.Write index.chunkOptions.minChars
+        writeTfidfOptions writer index.tfidfOptions
         writer.Write(index.createdAt.ToUnixTimeMilliseconds())
         writer.Write index.passages.Length
 
@@ -150,6 +170,7 @@ module IndexPersistence =
             writer.Write passage.reference.sourceLocation
             writer.Write passage.reference.index
             writer.Write passage.reference.text
+            writeStringList writer passage.reference.keywords
             writer.Write passage.terms.Count
 
             for term in passage.terms do
@@ -170,7 +191,7 @@ module IndexPersistence =
 
         let fileVersion = reader.ReadInt32()
 
-        if fileVersion <> version then
+        if fileVersion < minimumReadableVersion || fileVersion > version then
             raise (InvalidDataException $"Unsupported FsColbert index version {fileVersion}.")
 
         let config = readConfig reader
@@ -180,16 +201,35 @@ module IndexPersistence =
               overlapChars = reader.ReadInt32()
               minChars = reader.ReadInt32() }
 
+        let tfidfOptions =
+            if fileVersion >= 3 then
+                readTfidfOptions reader
+            else
+                TfidfOptions.defaults
+
         let createdAt = DateTimeOffset.FromUnixTimeMilliseconds(reader.ReadInt64())
 
         let passages =
             [ for _ = 1 to reader.ReadInt32() do
+                  let sourceId = reader.ReadString()
+                  let sourceDisplayName = reader.ReadString()
+                  let sourceLocation = reader.ReadString()
+                  let index = reader.ReadInt32()
+                  let text = reader.ReadString()
+
+                  let keywords =
+                      if fileVersion >= 3 then
+                          readStringList reader
+                      else
+                          []
+
                   let reference =
-                      { sourceId = reader.ReadString()
-                        sourceDisplayName = reader.ReadString()
-                        sourceLocation = reader.ReadString()
-                        index = reader.ReadInt32()
-                        text = reader.ReadString() }
+                      { sourceId = sourceId
+                        sourceDisplayName = sourceDisplayName
+                        sourceLocation = sourceLocation
+                        index = index
+                        text = text
+                        keywords = keywords }
 
                   let terms =
                       [ for _ = 1 to reader.ReadInt32() do
@@ -202,10 +242,30 @@ module IndexPersistence =
 
         { config = config
           chunkOptions = chunkOptions
+          tfidfOptions = tfidfOptions
           passages = passages
           tfidf = readTfidf reader
           createdAt = createdAt }
 
+    let tryLoad (path: string) =
+        if File.Exists path then
+            try
+                Ok(Some(load path))
+            with ex ->
+                Error $"Unable to load FsColbert index '{path}': {ex.Message}"
+        else
+            Ok None
+
+    let loadMany (folder: string) =
+        if Directory.Exists folder then
+            Directory.EnumerateFiles(folder, "*.fsci")
+            |> Seq.map (fun path -> path, tryLoad path)
+            |> Seq.toList
+        else
+            []
+
     let saveAsync path index = async { save path index }
 
     let loadAsync path = async { return load path }
+
+    let tryLoadAsync path = async { return tryLoad path }

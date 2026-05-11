@@ -108,3 +108,20 @@ Based on Microsoft F# style guidance and common community conventions:
 - Add mutation only where measured and justified.
 - Introduce classes only for integration/stateful boundaries.
 - Keep the public surface area simple, explicit, and domain-oriented.
+
+## Parallelization
+For parallel processing, if feasible use FSharp.Control.AsyncSeq as in:
+```fsharp
+#r "nuget: FSharp.Control.AsyncSeq"
+open FSharp.Control
+
+let workOnChunk data = async {
+    return data
+}
+
+let data = [1;2;3]
+data 
+|> AsyncSeq.ofSeq
+|> AsyncSeq.bufferByCountAndTime 16 1
+|> AsyncSeq.mapAsyncParallelThrottled 3 workOnChunk
+```

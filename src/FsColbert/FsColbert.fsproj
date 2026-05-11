@@ -35,6 +35,7 @@
 
   <ItemGroup>
     <PackageReference Include="F23.StringSimilarity" Version="7.0.1" />
+    <PackageReference Include="FSharp.Control.AsyncSeq" Version="4.15.0" />
     <PackageReference Include="FSharp.DI" Version="1.0.0" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.25.1" />
     <PackageReference Include="Microsoft.ML.Tokenizers" Version="2.0.0" />

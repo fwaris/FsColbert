@@ -1,10 +1,198 @@
 namespace FsColbert
 
 open System
+open FSharp.Control
 
 module IndexBuilder =
     let private allPassages options (sources: SourceDocument list) =
         sources |> List.filter _.enabled |> List.collect (Text.splitPassages options)
+
+    let private cleanKeywords maxKeywords values =
+        values
+        |> List.choose (fun value ->
+            let trimmed = Text.normalizeWhitespace value
+
+            if String.IsNullOrWhiteSpace trimmed then
+                None
+            else
+                Some trimmed)
+        |> List.distinctBy _.ToLowerInvariant()
+        |> List.truncate maxKeywords
+
+    let private keywordKey sourceId passageIndex = sourceId, passageIndex
+
+    let private mergeKeywords options existing generated =
+        let values =
+            if options.replaceExistingKeywords then
+                generated
+            else
+                existing @ generated
+
+        cleanKeywords options.maxKeywordsPerPassage values
+
+    let private applyKeywordResults
+        (options: KeywordElaborationOptions)
+        (passages: PassageRef list)
+        (results: PassageKeywordResult list)
+        =
+        let generated =
+            results
+            |> List.groupBy (fun result -> keywordKey result.sourceId result.passageIndex)
+            |> List.map (fun (key, items) -> key, items |> List.collect _.keywords)
+            |> Map.ofList
+
+        passages
+        |> List.map (fun passage ->
+            let key = keywordKey passage.sourceId passage.index
+
+            match Map.tryFind key generated with
+            | Some keywords ->
+                { passage with
+                    keywords = mergeKeywords options passage.keywords keywords }
+            | None ->
+                { passage with
+                    keywords = cleanKeywords options.maxKeywordsPerPassage passage.keywords })
+
+    let elaborateKeywords
+        (keywordOptions: KeywordElaborationOptions)
+        (passages: PassageRef list)
+        =
+        async {
+            let keywordOptions = KeywordElaborationOptions.sanitize keywordOptions
+
+            match keywordOptions.generator, passages with
+            | None, _ -> return passages
+            | _, [] -> return []
+            | Some generator, _ ->
+                let! generated =
+                    passages
+                    |> List.chunkBySize keywordOptions.batchSize
+                    |> AsyncSeq.ofSeq
+                    |> AsyncSeq.mapAsyncParallelThrottled
+                        keywordOptions.maxDegreeOfParallelism
+                        generator.GenerateKeywordsAsync
+                    |> AsyncSeq.toListAsync
+
+                return
+                    generated
+                    |> List.collect id
+                    |> applyKeywordResults keywordOptions passages
+        }
+
+    let private indexBatch (encoder: OnnxColbertEncoder) (batch: (int * PassageRef) array) =
+        async {
+            let texts = batch |> Array.map (fun (_, passage) -> passage.text)
+            let! encoded = encoder.EncodeDocumentsAsync texts
+
+            return
+                Array.zip batch encoded
+                |> Array.map (fun ((ordinal, passage), encoded) ->
+                    ordinal,
+                    { reference = passage
+                      embedding = encoded.embedding
+                      terms = Text.terms passage.text })
+        }
+
+    let private reportProgress progress completed total currentSource =
+        progress
+        |> Option.iter (fun report ->
+            report
+                { completedPassages = completed
+                  totalPassages = total
+                  currentSource = currentSource })
+
+    let private indexPassages
+        (encoder: OnnxColbertEncoder)
+        (indexingOptions: IndexingOptions)
+        (passages: PassageRef list)
+        (progress: (IndexProgress -> unit) option)
+        =
+        async {
+            let passages = passages |> List.toArray
+            let total = passages.Length
+            let results = Array.zeroCreate<IndexedPassage> total
+            let indexingOptions = IndexingOptions.sanitize indexingOptions
+            let parallelism = min (max 1 total) indexingOptions.maxDegreeOfParallelism
+            let progressLock = obj ()
+            let mutable completed = 0
+
+            reportProgress progress completed total None
+
+            let storeBatch (batch: (int * IndexedPassage) array) =
+                for ordinal, indexed in batch do
+                    results[ordinal] <- indexed
+
+                lock progressLock (fun () ->
+                    completed <- completed + batch.Length
+
+                    let currentSource =
+                        batch
+                        |> Array.tryLast
+                        |> Option.map (fun (_, indexed) -> indexed.reference.sourceDisplayName)
+
+                    reportProgress progress completed total currentSource)
+
+            if total > 0 then
+                do!
+                    passages
+                    |> Array.mapi (fun ordinal passage -> ordinal, passage)
+                    |> AsyncSeq.ofSeq
+                    |> AsyncSeq.bufferByCountAndTime indexingOptions.batchSize 1
+                    |> AsyncSeq.mapAsyncParallelThrottled parallelism (indexBatch encoder)
+                    |> AsyncSeq.iterAsync (fun batch -> async { storeBatch batch })
+
+            reportProgress progress completed total None
+
+            return results |> Array.toList
+        }
+
+    let createWithOptionsAndTfidfOptionsAndKeywordElaborationOptions
+        (encoder: OnnxColbertEncoder)
+        (options: ChunkOptions)
+        (indexingOptions: IndexingOptions)
+        (tfidfOptions: TfidfOptions)
+        (keywordOptions: KeywordElaborationOptions)
+        (sources: SourceDocument list)
+        (progress: (IndexProgress -> unit) option)
+        =
+        async {
+            let! passages = allPassages options sources |> elaborateKeywords keywordOptions
+            let! indexed = indexPassages encoder indexingOptions passages progress
+
+            return
+                { config = encoder.Config
+                  chunkOptions = options
+                  tfidfOptions = tfidfOptions
+                  passages = indexed
+                  tfidf = Tfidf.buildWithOptions tfidfOptions indexed
+                  createdAt = DateTimeOffset.UtcNow }
+        }
+
+    let createWithOptionsAndTfidfOptions
+        (encoder: OnnxColbertEncoder)
+        (options: ChunkOptions)
+        (indexingOptions: IndexingOptions)
+        (tfidfOptions: TfidfOptions)
+        (sources: SourceDocument list)
+        (progress: (IndexProgress -> unit) option)
+        =
+        createWithOptionsAndTfidfOptionsAndKeywordElaborationOptions
+            encoder
+            options
+            indexingOptions
+            tfidfOptions
+            KeywordElaborationOptions.disabled
+            sources
+            progress
+
+    let createWithOptions
+        (encoder: OnnxColbertEncoder)
+        (options: ChunkOptions)
+        (indexingOptions: IndexingOptions)
+        (sources: SourceDocument list)
+        (progress: (IndexProgress -> unit) option)
+        =
+        createWithOptionsAndTfidfOptions encoder options indexingOptions TfidfOptions.defaults sources progress
 
     let create
         (encoder: OnnxColbertEncoder)
@@ -12,49 +200,64 @@ module IndexBuilder =
         (sources: SourceDocument list)
         (progress: (IndexProgress -> unit) option)
         =
-        async {
-            let passages = allPassages options sources
-            let total = passages.Length
-            let mutable completed = 0
-            let indexed = ResizeArray<IndexedPassage>()
-
-            for passage in passages do
-                progress
-                |> Option.iter (fun report ->
-                    report
-                        { completedPassages = completed
-                          totalPassages = total
-                          currentSource = Some passage.sourceDisplayName })
-
-                let! encoded = encoder.EncodeDocumentAsync passage.text
-
-                indexed.Add(
-                    { reference = passage
-                      embedding = encoded.embedding
-                      terms = Text.terms passage.text }
-                )
-
-                completed <- completed + 1
-
-            progress
-            |> Option.iter (fun report ->
-                report
-                    { completedPassages = completed
-                      totalPassages = total
-                      currentSource = None })
-
-            let indexed = indexed |> Seq.toList
-
-            return
-                { config = encoder.Config
-                  chunkOptions = options
-                  passages = indexed
-                  tfidf = Tfidf.build indexed
-                  createdAt = DateTimeOffset.UtcNow }
-        }
+        createWithOptions encoder options IndexingOptions.defaults sources progress
 
     let createWithDefaults encoder sources progress =
         create encoder ChunkOptions.fsKameDefaults sources progress
+
+    let createFromPassagesWithOptionsAndTfidfOptionsAndKeywordElaborationOptions
+        (encoder: OnnxColbertEncoder)
+        (chunkOptions: ChunkOptions)
+        (indexingOptions: IndexingOptions)
+        (tfidfOptions: TfidfOptions)
+        (keywordOptions: KeywordElaborationOptions)
+        (passages: PassageRef list)
+        (progress: (IndexProgress -> unit) option)
+        =
+        async {
+            let! passages = elaborateKeywords keywordOptions passages
+            let! indexed = indexPassages encoder indexingOptions passages progress
+
+            return
+                { config = encoder.Config
+                  chunkOptions = chunkOptions
+                  tfidfOptions = tfidfOptions
+                  passages = indexed
+                  tfidf = Tfidf.buildWithOptions tfidfOptions indexed
+                  createdAt = DateTimeOffset.UtcNow }
+        }
+
+    let createFromPassagesWithOptionsAndTfidfOptions
+        (encoder: OnnxColbertEncoder)
+        (chunkOptions: ChunkOptions)
+        (indexingOptions: IndexingOptions)
+        (tfidfOptions: TfidfOptions)
+        (passages: PassageRef list)
+        (progress: (IndexProgress -> unit) option)
+        =
+        createFromPassagesWithOptionsAndTfidfOptionsAndKeywordElaborationOptions
+            encoder
+            chunkOptions
+            indexingOptions
+            tfidfOptions
+            KeywordElaborationOptions.disabled
+            passages
+            progress
+
+    let createFromPassagesWithOptions
+        (encoder: OnnxColbertEncoder)
+        (chunkOptions: ChunkOptions)
+        (indexingOptions: IndexingOptions)
+        (passages: PassageRef list)
+        (progress: (IndexProgress -> unit) option)
+        =
+        createFromPassagesWithOptionsAndTfidfOptions
+            encoder
+            chunkOptions
+            indexingOptions
+            TfidfOptions.defaults
+            passages
+            progress
 
     let createFromPassages
         (encoder: OnnxColbertEncoder)
@@ -62,45 +265,7 @@ module IndexBuilder =
         (passages: PassageRef list)
         (progress: (IndexProgress -> unit) option)
         =
-        async {
-            let total = passages.Length
-            let mutable completed = 0
-            let indexed = ResizeArray<IndexedPassage>()
-
-            for passage in passages do
-                progress
-                |> Option.iter (fun report ->
-                    report
-                        { completedPassages = completed
-                          totalPassages = total
-                          currentSource = Some passage.sourceDisplayName })
-
-                let! encoded = encoder.EncodeDocumentAsync passage.text
-
-                indexed.Add(
-                    { reference = passage
-                      embedding = encoded.embedding
-                      terms = Text.terms passage.text }
-                )
-
-                completed <- completed + 1
-
-            progress
-            |> Option.iter (fun report ->
-                report
-                    { completedPassages = completed
-                      totalPassages = total
-                      currentSource = None })
-
-            let indexed = indexed |> Seq.toList
-
-            return
-                { config = encoder.Config
-                  chunkOptions = chunkOptions
-                  passages = indexed
-                  tfidf = Tfidf.build indexed
-                  createdAt = DateTimeOffset.UtcNow }
-        }
+        createFromPassagesWithOptions encoder chunkOptions IndexingOptions.defaults passages progress
 
 module Search =
     let private candidatePassages options (index: ColbertIndex) queryText searchTerms =
@@ -119,40 +284,44 @@ module Search =
             passages |> Array.map (fun p -> p, 0.0f) |> Array.toList
 
     let private reciprocalRankFusion k denseWeight lexicalWeight (hits: SearchHit list) =
-        let denseRank = 
-            hits 
-            |> List.sortByDescending (fun h -> h.denseScore) 
+        let denseRank =
+            hits
+            |> List.sortByDescending (fun h -> h.denseScore)
             |> List.mapi (fun i h -> h.reference, i + 1)
             |> Map.ofList
 
-        let lexicalRank = 
-            hits 
-            |> List.sortByDescending (fun h -> h.lexicalScore) 
+        let lexicalRank =
+            hits
+            |> List.sortByDescending (fun h -> h.lexicalScore)
             |> List.mapi (fun i h -> h.reference, i + 1)
             |> Map.ofList
 
-        hits |> List.map (fun h ->
+        hits
+        |> List.map (fun h ->
             let rDense = Map.find h.reference denseRank
             let rLexical = Map.find h.reference lexicalRank
-            let score = 
-                denseWeight * (1.0f / (float32 k + float32 rDense)) + 
-                lexicalWeight * (1.0f / (float32 k + float32 rLexical))
-            { h with score = score }
-        )
+
+            let score =
+                denseWeight * (1.0f / (float32 k + float32 rDense))
+                + lexicalWeight * (1.0f / (float32 k + float32 rLexical))
+
+            { h with score = score })
 
     let private rankCandidates options queryEmbedding candidates =
-        let rawHits = 
+        let rawHits =
             candidates
             |> List.map (fun (passage, lexicalScore) ->
                 let denseScore = Scoring.maxSim queryEmbedding passage.embedding
-                let score = Scoring.combinedScore options.denseWeight options.lexicalWeight denseScore lexicalScore
+
+                let score =
+                    Scoring.combinedScore options.denseWeight options.lexicalWeight denseScore lexicalScore
 
                 { reference = passage.reference
                   denseScore = denseScore
                   lexicalScore = lexicalScore
                   score = score })
 
-        let hits = 
+        let hits =
             if options.useRRF then
                 reciprocalRankFusion options.fusionK options.denseWeight options.lexicalWeight rawHits
             else

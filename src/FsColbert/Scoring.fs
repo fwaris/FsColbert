@@ -1,11 +1,28 @@
 namespace FsColbert
 
+open System.Numerics
+
 module Scoring =
     let private dot dim (left: float32 array) leftOffset (right: float32 array) rightOffset =
+        let vectorWidth = Vector<float32>.Count
+        let vectorLimit = dim - (dim % vectorWidth)
+        let mutable vectorAcc = Vector<float32>.Zero
+        let mutable index = 0
+
+        while index < vectorLimit do
+            let leftVector = Vector<float32>(left, leftOffset + index)
+            let rightVector = Vector<float32>(right, rightOffset + index)
+            vectorAcc <- vectorAcc + (leftVector * rightVector)
+            index <- index + vectorWidth
+
         let mutable acc = 0.0f
 
-        for index = 0 to dim - 1 do
+        for lane = 0 to vectorWidth - 1 do
+            acc <- acc + vectorAcc[lane]
+
+        while index < dim do
             acc <- acc + left[leftOffset + index] * right[rightOffset + index]
+            index <- index + 1
 
         acc
 
