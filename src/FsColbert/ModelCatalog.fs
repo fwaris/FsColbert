@@ -13,6 +13,15 @@ type ModelManifest =
       tokenizerFileName: string
       configFileName: string }
 
+type DoclingOnnxModelManifest =
+    { id: string
+      modelUrl: string
+      configUrl: string
+      preprocessorConfigUrl: string
+      modelFileName: string
+      configFileName: string
+      preprocessorConfigFileName: string }
+
 module ModelCatalog =
     let mxbaiEdgeColbertInt8 =
         { id = "lightonai/mxbai-edge-colbert-v0-32m-onnx:int8"
@@ -22,6 +31,26 @@ module ModelCatalog =
           modelFileName = "model_int8.onnx"
           tokenizerFileName = "tokenizer.json"
           configFileName = "onnx_config.json" }
+
+    let doclingLayoutHeronOnnx =
+        { id = "docling-project/docling-layout-heron-onnx"
+          modelUrl = "https://huggingface.co/docling-project/docling-layout-heron-onnx/resolve/main/model.onnx"
+          configUrl = "https://huggingface.co/docling-project/docling-layout-heron-onnx/resolve/main/config.json"
+          preprocessorConfigUrl =
+            "https://huggingface.co/docling-project/docling-layout-heron-onnx/resolve/main/preprocessor_config.json"
+          modelFileName = "model.onnx"
+          configFileName = "config.json"
+          preprocessorConfigFileName = "preprocessor_config.json" }
+
+    let doclingDocumentFigureClassifierV25Onnx =
+        { id = "docling-project/DocumentFigureClassifier-v2.5"
+          modelUrl = "https://huggingface.co/docling-project/DocumentFigureClassifier-v2.5/resolve/main/model.onnx"
+          configUrl = "https://huggingface.co/docling-project/DocumentFigureClassifier-v2.5/resolve/main/config.json"
+          preprocessorConfigUrl =
+            "https://huggingface.co/docling-project/DocumentFigureClassifier-v2.5/resolve/main/preprocessor_config.json"
+          modelFileName = "model.onnx"
+          configFileName = "config.json"
+          preprocessorConfigFileName = "preprocessor_config.json" }
 
     let private downloadFileAsync (client: HttpClient) url path =
         async {
@@ -49,4 +78,24 @@ module ModelCatalog =
                 { modelPath = modelPath
                   tokenizerPath = tokenizerPath
                   configPath = Some configPath }
+        }
+
+    let ensureDoclingOnnxDownloadedAsync (client: HttpClient) (folder: string) (manifest: DoclingOnnxModelManifest) =
+        async {
+            Directory.CreateDirectory folder |> ignore
+
+            let modelPath = Path.Combine(folder, manifest.modelFileName)
+            let configPath = Path.Combine(folder, manifest.configFileName)
+
+            let preprocessorConfigPath =
+                Path.Combine(folder, manifest.preprocessorConfigFileName)
+
+            do! downloadFileAsync client manifest.modelUrl modelPath
+            do! downloadFileAsync client manifest.configUrl configPath
+            do! downloadFileAsync client manifest.preprocessorConfigUrl preprocessorConfigPath
+
+            return
+                { modelPath = modelPath
+                  configPath = configPath
+                  preprocessorConfigPath = preprocessorConfigPath }
         }

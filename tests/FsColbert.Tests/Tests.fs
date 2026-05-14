@@ -329,8 +329,7 @@ let ``keyword elaboration generator attaches generated terms before tfidf build`
                     keywords = [ "orthodontia"; "dental braces" ] } ]
             )
 
-        let! elaborated =
-            IndexBuilder.elaborateKeywords (KeywordElaborationOptions.withGenerator generator) passages
+        let! elaborated = IndexBuilder.elaborateKeywords (KeywordElaborationOptions.withGenerator generator) passages
 
         let indexed =
             elaborated
@@ -448,3 +447,411 @@ let ``persistence loads version 2 indexes with empty keywords`` () =
     finally
         if IO.File.Exists path then
             IO.File.Delete path
+
+type private StaticDoclingLayoutPredictor(predictions: DoclingLayoutPrediction list) =
+    interface IDoclingLayoutPredictor with
+        member _.PredictLayoutAsync pages =
+            async {
+                let requested = pages |> List.map _.pageNo |> Set.ofList
+
+                return
+                    predictions
+                    |> List.filter (fun prediction -> requested.Contains prediction.pageNo)
+                    |> Ok
+            }
+
+type private StaticDoclingFigureClassifier(classes: DoclingFigureClass list) =
+    interface IDoclingFigureClassifier with
+        member _.ClassifyAsync _ = async { return Ok classes }
+
+let private ocr text l t r b =
+    { text = text
+      bbox = DoclingGeometry.topLeftBox l t r b
+      confidence = Some 0.99 }
+
+let private nativeCell text l bottom r top =
+    { text = text
+      bbox = DoclingGeometry.bottomLeftBox l bottom r top
+      confidence = None }
+
+let private cluster id label l t r b =
+    { id = id
+      label = label
+      confidence = 0.95f
+      bbox = DoclingGeometry.topLeftBox l t r b
+      cells = [] }
+
+[<Fact>]
+let ``docling geometry converts origins and computes overlap`` () =
+    let bottomLeft = DoclingGeometry.bottomLeftBox 10.0 10.0 60.0 30.0
+    let topLeft = DoclingGeometry.toTopLeft 100.0 bottomLeft
+
+    Assert.Equal(70.0, topLeft.t, 3)
+    Assert.Equal(90.0, topLeft.b, 3)
+    Assert.Equal(TopLeft, topLeft.coordOrigin)
+
+    let cell = DoclingGeometry.topLeftBox 10.0 10.0 30.0 30.0
+    let region = DoclingGeometry.topLeftBox 20.0 10.0 40.0 30.0
+
+    Assert.Equal(0.5, DoclingGeometry.intersectionOverSelf cell region, 3)
+
+[<Fact>]
+let ``docling cells scale native coordinates and prefer native over overlapping ocr`` () =
+    let image = DoclingRgbImage.solid 400 800 255uy 255uy 255uy
+    let native = [ nativeCell "Native text" 10.0 320.0 120.0 340.0 ]
+
+    let ocrCells =
+        [ ocr "OCR text" 20.0 122.0 130.0 156.0
+          ocr "Other line" 20.0 200.0 130.0 222.0 ]
+
+    let scaledNative =
+        DoclingCells.scaleCellsToImage { width = 200.0; height = 400.0 } image native
+
+    let topLeftNative = DoclingGeometry.toTopLeft 800.0 scaledNative.Head.bbox
+
+    Assert.Equal(20.0, topLeftNative.l, 3)
+    Assert.Equal(120.0, topLeftNative.t, 3)
+    Assert.Equal(240.0, topLeftNative.r, 3)
+    Assert.Equal(160.0, topLeftNative.b, 3)
+
+    let merged = DoclingCells.mergePreferPrimary 800.0 0.7 scaledNative ocrCells
+
+    Assert.Equal<string list>([ "Native text"; "Other line" ], merged |> List.map _.text)
+    Assert.True(DoclingCells.hasEnoughText 10 merged)
+
+[<Fact>]
+let ``standard hybrid assembles native cells without full page ocr`` () =
+    async {
+        let image = DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+
+        let page =
+            { pageNo = 1
+              image = image
+              ocrCells =
+                [ nativeCell "Native" 20.0 270.0 80.0 295.0
+                  nativeCell "PDF" 90.0 270.0 135.0 295.0
+                  nativeCell "text" 145.0 270.0 190.0 295.0 ] }
+
+        let predictions =
+            [ { pageNo = 1
+                clusters = [ cluster 0 Text 15.0 95.0 210.0 140.0 ] } ]
+
+        let layout = StaticDoclingLayoutPredictor predictions :> IDoclingLayoutPredictor
+
+        let! result = DoclingStandardHybrid.convertPages "native" (Some "native.pdf") layout None [ page ]
+
+        match result with
+        | Error err -> failwith err
+        | Ok document ->
+            Assert.Single document.texts |> ignore
+            Assert.Equal("Native PDF text", document.texts.Head.text)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``standard hybrid builds docling json with reading order tables and pictures`` () =
+    async {
+        let image = DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+
+        let page =
+            { pageNo = 1
+              image = image
+              ocrCells =
+                [ ocr "Confidential" 10.0 8.0 120.0 24.0
+                  ocr "Quarterly Results" 20.0 80.0 220.0 110.0
+                  ocr "Revenue grew quickly." 20.0 125.0 250.0 150.0
+                  ocr "Q1 100" 30.0 205.0 100.0 225.0
+                  ocr "Q2 120" 30.0 230.0 100.0 250.0 ] }
+
+        let predictions =
+            [ { pageNo = 1
+                clusters =
+                  [ cluster 0 PageHeader 0.0 0.0 400.0 40.0
+                    cluster 1 Text 20.0 75.0 280.0 160.0
+                    cluster 2 Table 20.0 195.0 180.0 265.0
+                    cluster 3 Picture 250.0 190.0 360.0 300.0 ] } ]
+
+        let layout = StaticDoclingLayoutPredictor predictions :> IDoclingLayoutPredictor
+
+        let classifier =
+            StaticDoclingFigureClassifier
+                [ { className = "bar_chart"
+                    confidence = 0.91f } ]
+            :> IDoclingFigureClassifier
+
+        let! result =
+            DoclingStandardHybrid.convertPages "quarterly" (Some "quarterly.pdf") layout (Some classifier) [ page ]
+
+        match result with
+        | Error err -> failwith err
+        | Ok document ->
+            Assert.Empty(DoclingJson.validateSubset document)
+            Assert.Equal(1, document.pages.Count)
+            Assert.Equal(2, document.texts.Length)
+            Assert.Single document.tables |> ignore
+            Assert.Single document.pictures |> ignore
+            Assert.Equal<string list>([ "#/texts/1"; "#/tables/0"; "#/pictures/0" ], document.bodyChildren)
+            Assert.Equal<string list>([ "#/texts/0" ], document.furnitureChildren)
+            Assert.Equal("Confidential", document.texts[0].text)
+            Assert.Equal("Quarterly Results Revenue grew quickly.", document.texts[1].text)
+            Assert.Equal(2, document.tables[0].data.numRows)
+            Assert.Equal("Q1 100", document.tables[0].data.tableCells[0].text)
+            Assert.Equal("bar_chart", document.pictures[0].classifications[0].className)
+            Assert.Equal<string list>([ "table" ], document.tables[0].keywords)
+            Assert.Equal<string list>([ "picture"; "bar_chart" ], document.pictures[0].keywords)
+
+            let json = DoclingJson.serialize document
+            use parsed = System.Text.Json.JsonDocument.Parse json
+            let root = parsed.RootElement
+
+            Assert.Equal("DoclingDocument", root.GetProperty("schema_name").GetString())
+            Assert.Equal("1.10.0", root.GetProperty("version").GetString())
+            let mutable pageElement = Unchecked.defaultof<System.Text.Json.JsonElement>
+            Assert.True(root.GetProperty("pages").TryGetProperty("1", &pageElement))
+            Assert.Equal("quarterly", root.GetProperty("name").GetString())
+            Assert.Equal("table", root.GetProperty("tables").[0].GetProperty("label").GetString())
+
+            Assert.Equal(
+                "classification",
+                root.GetProperty("pictures").[0].GetProperty("annotations").[0].GetProperty("kind").GetString()
+            )
+
+            Assert.Equal(
+                "table",
+                root
+                    .GetProperty("tables")
+                    .[0].GetProperty("meta")
+                    .GetProperty("fscolbert")
+                    .GetProperty("keywords")
+                    .[0].GetString()
+            )
+
+            Assert.Equal(
+                "quarterly",
+                root
+                    .GetProperty("pictures")
+                    .[0].GetProperty("meta")
+                    .GetProperty("fscolbert")
+                    .GetProperty("source_id")
+                    .GetString()
+            )
+
+            match DoclingJson.tryDeserialize json with
+            | Error err -> failwith err
+            | Ok roundTripped ->
+                Assert.Equal<string list>([ "picture"; "bar_chart" ], roundTripped.pictures[0].keywords)
+                Assert.Equal(Some "quarterly", roundTripped.texts[0].sourceId)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``docling passages render body text table rows and picture metadata`` () =
+    let table =
+        { selfRef = "#/tables/0"
+          parent = "#/body"
+          label = Table
+          contentLayer = Body
+          prov =
+            [ { pageNo = 1
+                bbox = DoclingGeometry.topLeftBox 0.0 0.0 100.0 100.0
+                charSpan = Some(0, 0) } ]
+          keywords = [ "revenue table" ]
+          sourceId = Some "doc"
+          sourceDisplayName = Some "Doc"
+          data =
+            { numRows = 2
+              numCols = 1
+              tableCells =
+                [ { text = "Alpha"
+                    bbox = None
+                    startRowOffsetIndex = 0
+                    endRowOffsetIndex = 1
+                    startColOffsetIndex = 0
+                    endColOffsetIndex = 1
+                    rowHeader = false
+                    columnHeader = false
+                    rowSection = false }
+                  { text = "Beta"
+                    bbox = None
+                    startRowOffsetIndex = 1
+                    endRowOffsetIndex = 2
+                    startColOffsetIndex = 0
+                    endColOffsetIndex = 1
+                    rowHeader = false
+                    columnHeader = false
+                    rowSection = false } ] } }
+
+    let document =
+        { name = "doc"
+          originFileName = None
+          originMimeType = None
+          pages =
+            [ 1,
+              { pageNo = 1
+                size = { width = 100.0; height = 100.0 } } ]
+            |> Map.ofList
+          texts =
+            [ { selfRef = "#/texts/0"
+                parent = "#/body"
+                label = Text
+                text = "Intro text"
+                orig = "Intro text"
+                contentLayer = Body
+                prov = []
+                keywords = [ "executive summary" ]
+                sourceId = Some "doc"
+                sourceDisplayName = Some "Doc" } ]
+          tables = [ table ]
+          pictures =
+            [ { selfRef = "#/pictures/0"
+                parent = "#/body"
+                label = Picture
+                contentLayer = Body
+                prov = []
+                classifications =
+                  [ { className = "photograph"
+                      confidence = 0.8f } ]
+                keywords = [ "product photo" ]
+                sourceId = Some "doc"
+                sourceDisplayName = Some "Doc" } ]
+          bodyChildren = [ "#/texts/0"; "#/tables/0"; "#/pictures/0" ]
+          furnitureChildren = [] }
+
+    let blocks = DoclingPassages.toBlocks document
+
+    Assert.Equal<string list>([ "Intro text"; "Alpha Beta"; "[Picture: photograph (0.800)]" ], blocks)
+
+    let source = PassageSource.create "doc" "Doc" "/tmp/doc.pdf"
+
+    let passages =
+        DoclingPassages.toPassages ChunkOptions.fsKameDefaults source document
+
+    let blocksWithKeywords = DoclingPassages.toBlocksWithKeywords document
+
+    Assert.Equal<string list>(
+        [ "executive summary"; "revenue table"; "product photo" ],
+        blocksWithKeywords |> List.collect _.keywords
+    )
+
+    Assert.Equal("doc", passages.Head.sourceId)
+    Assert.Contains("Intro text", passages.Head.text)
+    Assert.Contains("executive summary", passages.Head.keywords)
+    Assert.Contains("revenue table", passages.Head.keywords)
+    Assert.Contains("product photo", passages.Head.keywords)
+
+[<Fact>]
+let ``docling derived keywords survive index persistence`` () =
+    let source = PassageSource.create "doc" "Doc" "/tmp/doc.json"
+
+    let document =
+        { name = "doc"
+          originFileName = None
+          originMimeType = None
+          pages =
+            [ 1,
+              { pageNo = 1
+                size = { width = 100.0; height = 100.0 } } ]
+            |> Map.ofList
+          texts =
+            [ { selfRef = "#/texts/0"
+                parent = "#/body"
+                label = Text
+                text = "A passage about benefits and waiting periods."
+                orig = "A passage about benefits and waiting periods."
+                contentLayer = Body
+                prov = []
+                keywords = [ "orthodontia"; "waiting period" ]
+                sourceId = Some "doc"
+                sourceDisplayName = Some "Doc" } ]
+          tables = []
+          pictures = []
+          bodyChildren = [ "#/texts/0" ]
+          furnitureChildren = [] }
+
+    let passage =
+        DoclingPassages.toPassages ChunkOptions.fsKameDefaults source document
+        |> List.head
+
+    let indexed =
+        { reference = passage
+          embedding = vector [| 1 |] [| 1.0f; 0.0f |]
+          terms = Text.terms passage.text }
+
+    let idx = index [ indexed ]
+    let path = IO.Path.Combine(IO.Path.GetTempPath(), $"{Guid.NewGuid():N}.fsci")
+
+    try
+        IndexPersistence.save path idx
+        let loaded = IndexPersistence.load path
+
+        Assert.Equal<string list>([ "orthodontia"; "waiting period" ], loaded.passages.Head.reference.keywords)
+        Assert.True(loaded.tfidf.vocabulary.ContainsKey "orthodontia")
+    finally
+        if IO.File.Exists path then
+            IO.File.Delete path
+
+[<Fact>]
+let ``index bundle manifest loads compatible indexes and rejects mismatched model`` () =
+    let folder =
+        IO.Path.Combine(IO.Path.GetTempPath(), $"fscolbert-bundle-{Guid.NewGuid():N}")
+
+    try
+        IO.Directory.CreateDirectory folder |> ignore
+
+        let indexPath = IO.Path.Combine(folder, "doc.fsci")
+        let manifestPath = IO.Path.Combine(folder, "index-bundle.json")
+
+        let idx =
+            index [ passage "doc" 0 "Bundle passage text" (vector [| 1 |] [| 1.0f; 0.0f |]) ]
+
+        IndexPersistence.save indexPath idx
+
+        let source =
+            { sourceId = "doc"
+              sourceDisplayName = "Doc"
+              sourceLocation = Some "doc.json"
+              sourceKind = Some "docling-json"
+              indexFile = "doc.fsci" }
+
+        let manifest =
+            IndexBundle.create
+                "bundle"
+                "1.0.0"
+                ModelCatalog.mxbaiEdgeColbertInt8.id
+                ChunkOptions.fsKameDefaults
+                TfidfOptions.defaults
+                [ source ]
+
+        IndexBundle.writeManifest manifestPath manifest
+
+        match IndexBundle.loadCompatible IndexBundleCompatibility.fsKameDefaults manifestPath with
+        | Error errors -> failwith (String.concat "\n" errors)
+        | Ok loaded ->
+            Assert.Equal("bundle", loaded.manifest.bundleId)
+            Assert.Single loaded.indexes |> ignore
+            Assert.Equal("doc", loaded.indexes.Head.source.sourceId)
+            Assert.Equal("doc.fsci", loaded.indexes.Head.source.indexFile)
+
+        let incompatible =
+            { IndexBundleCompatibility.fsKameDefaults with
+                modelId = "different/model" }
+
+        match IndexBundle.loadCompatible incompatible manifestPath with
+        | Ok _ -> failwith "Expected bundle incompatibility."
+        | Error errors -> Assert.Contains(errors, fun error -> error.Contains("model_id"))
+    finally
+        if IO.Directory.Exists folder then
+            IO.Directory.Delete(folder, true)
+
+[<Fact>]
+let ``docling model catalog exposes layout and figure manifests`` () =
+    Assert.Equal("docling-project/docling-layout-heron-onnx", ModelCatalog.doclingLayoutHeronOnnx.id)
+    Assert.EndsWith("/model.onnx", ModelCatalog.doclingLayoutHeronOnnx.modelUrl)
+    Assert.Equal("preprocessor_config.json", ModelCatalog.doclingLayoutHeronOnnx.preprocessorConfigFileName)
+
+    Assert.Equal(
+        "docling-project/DocumentFigureClassifier-v2.5",
+        ModelCatalog.doclingDocumentFigureClassifierV25Onnx.id
+    )
+
+    Assert.EndsWith("/config.json", ModelCatalog.doclingDocumentFigureClassifierV25Onnx.configUrl)

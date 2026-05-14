@@ -21,14 +21,19 @@
     <Compile Include="Types.fs" />
     <Compile Include="Text.fs" />
     <Compile Include="Documents.fs" />
+    <Compile Include="DoclingTypes.fs" />
+    <Compile Include="DoclingPdf.fs" />
+    <Compile Include="DoclingPipeline.fs" />
     <Compile Include="Tfidf.fs" />
     <Compile Include="ModelConfig.fs" />
     <Compile Include="Tokenizer.fs" />
     <Compile Include="OnnxEncoder.fs" />
+    <Compile Include="DoclingOnnx.fs" />
     <Compile Include="Scoring.fs" />
     <Compile Include="Index.fs" />
     <Compile Include="Persistence.fs" />
     <Compile Include="ModelCatalog.fs" />
+    <Compile Include="IndexBundle.fs" />
     <Compile Include="Integration.fs" />
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
