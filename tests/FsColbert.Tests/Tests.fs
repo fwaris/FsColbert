@@ -3,6 +3,7 @@ module FsColbert.Tests
 open System
 open System.IO
 open System.Numerics
+open System.Threading
 open FsColbert
 open Xunit
 
@@ -460,6 +461,34 @@ type private StaticDoclingLayoutPredictor(predictions: DoclingLayoutPrediction l
                     |> Ok
             }
 
+type private CountingCancelableDoclingLayoutPredictor(predictions: DoclingLayoutPrediction list) =
+    let mutable cancelableCalls = 0
+    let mutable legacyCalls = 0
+
+    member _.CancelableCalls = cancelableCalls
+
+    member _.LegacyCalls = legacyCalls
+
+    interface IDoclingLayoutPredictor with
+        member _.PredictLayoutAsync _ =
+            async {
+                legacyCalls <- legacyCalls + 1
+                return Ok predictions
+            }
+
+    interface ICancelableDoclingLayoutPredictor with
+        member _.PredictLayoutAsync(pages, cancellationToken) =
+            async {
+                cancellationToken.ThrowIfCancellationRequested()
+                cancelableCalls <- cancelableCalls + 1
+                let requested = pages |> List.map _.pageNo |> Set.ofList
+
+                return
+                    predictions
+                    |> List.filter (fun prediction -> requested.Contains prediction.pageNo)
+                    |> Ok
+            }
+
 type private StaticDoclingFigureClassifier(classes: DoclingFigureClass list) =
     interface IDoclingFigureClassifier with
         member _.ClassifyAsync _ = async { return Ok classes }
@@ -547,6 +576,88 @@ let ``standard hybrid assembles native cells without full page ocr`` () =
             Assert.Equal("Native PDF text", document.texts.Head.text)
     }
     |> Async.RunSynchronously
+
+[<Fact>]
+let ``standard hybrid honors pre-canceled conversion token before predictor work`` () =
+    let image = DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+
+    let page =
+        { pageNo = 1
+          image = image
+          ocrCells = [ nativeCell "Native text" 20.0 270.0 120.0 295.0 ] }
+
+    let layout =
+        CountingCancelableDoclingLayoutPredictor
+            [ { pageNo = 1
+                clusters = [ cluster 0 Text 15.0 95.0 210.0 140.0 ] } ]
+
+    use cts = new CancellationTokenSource()
+    cts.Cancel()
+
+    Assert.Throws<OperationCanceledException>(fun () ->
+        DoclingStandardHybrid.convertPagesWithOptionsWithCancellation
+            DoclingConversionOptions.defaults
+            "native"
+            (Some "native.pdf")
+            (layout :> IDoclingLayoutPredictor)
+            None
+            [ page ]
+            cts.Token
+        |> Async.RunSynchronously
+        |> ignore)
+    |> ignore
+
+    Assert.Equal(0, layout.CancelableCalls)
+    Assert.Equal(0, layout.LegacyCalls)
+
+[<Fact>]
+let ``standard hybrid uses cancelable predictor overload when available`` () =
+    async {
+        let image = DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+
+        let page =
+            { pageNo = 1
+              image = image
+              ocrCells = [ nativeCell "Native text" 20.0 270.0 120.0 295.0 ] }
+
+        let layout =
+            CountingCancelableDoclingLayoutPredictor
+                [ { pageNo = 1
+                    clusters = [ cluster 0 Text 15.0 95.0 210.0 140.0 ] } ]
+
+        let! result =
+            DoclingStandardHybrid.convertPagesWithOptionsWithCancellation
+                DoclingConversionOptions.defaults
+                "native"
+                (Some "native.pdf")
+                (layout :> IDoclingLayoutPredictor)
+                None
+                [ page ]
+                CancellationToken.None
+
+        match result with
+        | Error err -> failwith err
+        | Ok _ ->
+            Assert.Equal(1, layout.CancelableCalls)
+            Assert.Equal(0, layout.LegacyCalls)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``index builder honors pre-canceled token before saving index`` () =
+    use cts = new CancellationTokenSource()
+    cts.Cancel()
+
+    Assert.Throws<OperationCanceledException>(fun () ->
+        IndexBuilder.createFromPassagesWithCancellation
+            Unchecked.defaultof<OnnxColbertEncoder>
+            ChunkOptions.fsKameDefaults
+            []
+            None
+            cts.Token
+        |> Async.RunSynchronously
+        |> ignore)
+    |> ignore
 
 [<Fact>]
 let ``standard hybrid builds docling json with reading order tables and pictures`` () =

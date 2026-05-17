@@ -1,6 +1,7 @@
 namespace FsColbert
 
 open System
+open System.Threading
 open System.Text.Json
 open System.Text.Json.Nodes
 
@@ -159,14 +160,31 @@ type DoclingOnnxModelFiles =
 type IDoclingPageRasterizer =
     abstract RasterizeAsync: path: string -> Async<Result<DoclingRasterPage list, string>>
 
+type ICancelableDoclingPageRasterizer =
+    abstract RasterizeAsync:
+        path: string * cancellationToken: CancellationToken -> Async<Result<DoclingRasterPage list, string>>
+
 type IDoclingOcrProvider =
     abstract RecognizeAsync: page: DoclingRasterPage -> Async<Result<DoclingOcrCell list, string>>
+
+type ICancelableDoclingOcrProvider =
+    abstract RecognizeAsync:
+        page: DoclingRasterPage * cancellationToken: CancellationToken -> Async<Result<DoclingOcrCell list, string>>
 
 type IDoclingLayoutPredictor =
     abstract PredictLayoutAsync: pages: DoclingPageInput list -> Async<Result<DoclingLayoutPrediction list, string>>
 
+type ICancelableDoclingLayoutPredictor =
+    abstract PredictLayoutAsync:
+        pages: DoclingPageInput list * cancellationToken: CancellationToken ->
+            Async<Result<DoclingLayoutPrediction list, string>>
+
 type IDoclingFigureClassifier =
     abstract ClassifyAsync: image: DoclingRgbImage -> Async<Result<DoclingFigureClass list, string>>
+
+type ICancelableDoclingFigureClassifier =
+    abstract ClassifyAsync:
+        image: DoclingRgbImage * cancellationToken: CancellationToken -> Async<Result<DoclingFigureClass list, string>>
 
 module DoclingLabels =
     let toJsonValue label =

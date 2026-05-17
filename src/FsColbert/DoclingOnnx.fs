@@ -4,6 +4,7 @@ open System
 open System.IO
 open System.Linq
 open System.Text.Json
+open System.Threading
 open Microsoft.ML.OnnxRuntime
 open Microsoft.ML.OnnxRuntime.Tensors
 
@@ -326,6 +327,24 @@ type DoclingLayoutOnnx(files: DoclingOnnxModelFiles, ?runtimeOptions: RuntimeOpt
                     return Ok(pages |> List.map this.PredictPage)
                 with ex ->
                     return Error $"Layout ONNX inference failed: {ex.Message}"
+            }
+
+    interface ICancelableDoclingLayoutPredictor with
+        member this.PredictLayoutAsync(pages, cancellationToken) =
+            async {
+                try
+                    let predictions =
+                        pages
+                        |> List.map (fun page ->
+                            cancellationToken.ThrowIfCancellationRequested()
+                            let prediction = this.PredictPage page
+                            cancellationToken.ThrowIfCancellationRequested()
+                            prediction)
+
+                    return Ok predictions
+                with
+                | :? OperationCanceledException -> return raise (OperationCanceledException cancellationToken)
+                | ex -> return Error $"Layout ONNX inference failed: {ex.Message}"
             }
 
     interface IDisposable with

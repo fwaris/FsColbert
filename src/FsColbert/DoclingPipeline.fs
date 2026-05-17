@@ -1,6 +1,7 @@
 namespace FsColbert
 
 open System
+open System.Threading
 
 type DoclingConversionOptions =
     { ocrCellOverlapThreshold: float
@@ -104,8 +105,27 @@ module DoclingAssembly =
     let private sanitizeText values =
         values |> String.concat " " |> Text.normalizeWhitespace
 
+    let private cellHeight (cell: DoclingOcrCell) = max 1.0 (cell.bbox.b - cell.bbox.t)
+
+    let private sameLine (line: DoclingOcrCell list) (cell: DoclingOcrCell) =
+        let lineTop = line |> List.averageBy (fun item -> item.bbox.t)
+        let lineHeight = line |> List.averageBy cellHeight
+        abs (cell.bbox.t - lineTop) <= max 3.0 (lineHeight * 0.6)
+
+    let private orderCellsForReading (cells: DoclingOcrCell list) =
+        let rec addCell (cell: DoclingOcrCell) (lines: DoclingOcrCell list list) =
+            match lines with
+            | [] -> [ [ cell ] ]
+            | line :: rest when sameLine line cell -> (cell :: line) :: rest
+            | line :: rest -> line :: addCell cell rest
+
+        cells
+        |> List.sortBy (fun cell -> cell.bbox.t)
+        |> List.fold (fun lines cell -> addCell cell lines) []
+        |> List.collect (List.sortBy (fun cell -> cell.bbox.l))
+
     let private clusterText (cluster: DoclingLayoutCluster) =
-        cluster.cells |> List.map _.text |> sanitizeText
+        cluster.cells |> orderCellsForReading |> List.map _.text |> sanitizeText
 
     let private toTextLabel label =
         if DoclingLabels.isTextLike label then label else Text
@@ -123,7 +143,7 @@ module DoclingAssembly =
     let private tableDataFromCluster cluster =
         let cells =
             cluster.cells
-            |> List.sortBy (fun cell -> cell.bbox.t, cell.bbox.l)
+            |> orderCellsForReading
             |> List.mapi (fun index cell ->
                 { text = Text.normalizeWhitespace cell.text
                   bbox = Some cell.bbox
@@ -391,7 +411,7 @@ module DoclingStandardHybrid =
 
         loop pages []
 
-    let convertPagesWithOptions
+    let rec convertPagesWithOptions
         (options: DoclingConversionOptions)
         (documentName: string)
         (originFileName: string option)
@@ -399,12 +419,40 @@ module DoclingStandardHybrid =
         (figureClassifier: IDoclingFigureClassifier option)
         (pages: DoclingPageInput list)
         =
+        convertPagesWithOptionsWithCancellation
+            options
+            documentName
+            originFileName
+            layoutPredictor
+            figureClassifier
+            pages
+            CancellationToken.None
+
+    and convertPagesWithOptionsWithCancellation
+        (options: DoclingConversionOptions)
+        (documentName: string)
+        (originFileName: string option)
+        (layoutPredictor: IDoclingLayoutPredictor)
+        (figureClassifier: IDoclingFigureClassifier option)
+        (pages: DoclingPageInput list)
+        (cancellationToken: CancellationToken)
+        =
         async {
-            let! predictions = layoutPredictor.PredictLayoutAsync pages
+            cancellationToken.ThrowIfCancellationRequested()
+
+            let! predictions =
+                match layoutPredictor with
+                | :? ICancelableDoclingLayoutPredictor as cancelable ->
+                    cancelable.PredictLayoutAsync(pages, cancellationToken)
+                | _ -> layoutPredictor.PredictLayoutAsync pages
+
+            cancellationToken.ThrowIfCancellationRequested()
 
             match predictions with
             | Error err -> return Error err
             | Ok predictions ->
+                cancellationToken.ThrowIfCancellationRequested()
+
                 return!
                     DoclingAssembly.fromPredictionsWithOptions
                         options

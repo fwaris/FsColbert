@@ -1,6 +1,7 @@
 namespace FsColbert
 
 open System
+open System.Threading
 open FSharp.Control
 
 module IndexBuilder =
@@ -53,10 +54,7 @@ module IndexBuilder =
                 { passage with
                     keywords = cleanKeywords options.maxKeywordsPerPassage passage.keywords })
 
-    let elaborateKeywords
-        (keywordOptions: KeywordElaborationOptions)
-        (passages: PassageRef list)
-        =
+    let elaborateKeywords (keywordOptions: KeywordElaborationOptions) (passages: PassageRef list) =
         async {
             let keywordOptions = KeywordElaborationOptions.sanitize keywordOptions
 
@@ -73,16 +71,19 @@ module IndexBuilder =
                         generator.GenerateKeywordsAsync
                     |> AsyncSeq.toListAsync
 
-                return
-                    generated
-                    |> List.collect id
-                    |> applyKeywordResults keywordOptions passages
+                return generated |> List.collect id |> applyKeywordResults keywordOptions passages
         }
 
-    let private indexBatch (encoder: OnnxColbertEncoder) (batch: (int * PassageRef) array) =
+    let private indexBatch
+        (encoder: OnnxColbertEncoder)
+        (cancellationToken: CancellationToken)
+        (batch: (int * PassageRef) array)
+        =
         async {
+            cancellationToken.ThrowIfCancellationRequested()
             let texts = batch |> Array.map (fun (_, passage) -> passage.text)
             let! encoded = encoder.EncodeDocumentsAsync texts
+            cancellationToken.ThrowIfCancellationRequested()
 
             return
                 Array.zip batch encoded
@@ -106,8 +107,10 @@ module IndexBuilder =
         (indexingOptions: IndexingOptions)
         (passages: PassageRef list)
         (progress: (IndexProgress -> unit) option)
+        (cancellationToken: CancellationToken)
         =
         async {
+            cancellationToken.ThrowIfCancellationRequested()
             let passages = passages |> List.toArray
             let total = passages.Length
             let results = Array.zeroCreate<IndexedPassage> total
@@ -138,9 +141,14 @@ module IndexBuilder =
                     |> Array.mapi (fun ordinal passage -> ordinal, passage)
                     |> AsyncSeq.ofSeq
                     |> AsyncSeq.bufferByCountAndTime indexingOptions.batchSize 1
-                    |> AsyncSeq.mapAsyncParallelThrottled parallelism (indexBatch encoder)
-                    |> AsyncSeq.iterAsync (fun batch -> async { storeBatch batch })
+                    |> AsyncSeq.mapAsyncParallelThrottled parallelism (indexBatch encoder cancellationToken)
+                    |> AsyncSeq.iterAsync (fun batch ->
+                        async {
+                            cancellationToken.ThrowIfCancellationRequested()
+                            storeBatch batch
+                        })
 
+            cancellationToken.ThrowIfCancellationRequested()
             reportProgress progress completed total None
 
             return results |> Array.toList
@@ -157,7 +165,7 @@ module IndexBuilder =
         =
         async {
             let! passages = allPassages options sources |> elaborateKeywords keywordOptions
-            let! indexed = indexPassages encoder indexingOptions passages progress
+            let! indexed = indexPassages encoder indexingOptions passages progress CancellationToken.None
 
             return
                 { config = encoder.Config
@@ -216,7 +224,33 @@ module IndexBuilder =
         =
         async {
             let! passages = elaborateKeywords keywordOptions passages
-            let! indexed = indexPassages encoder indexingOptions passages progress
+            let! indexed = indexPassages encoder indexingOptions passages progress CancellationToken.None
+
+            return
+                { config = encoder.Config
+                  chunkOptions = chunkOptions
+                  tfidfOptions = tfidfOptions
+                  passages = indexed
+                  tfidf = Tfidf.buildWithOptions tfidfOptions indexed
+                  createdAt = DateTimeOffset.UtcNow }
+        }
+
+    let createFromPassagesWithOptionsAndTfidfOptionsAndKeywordElaborationOptionsWithCancellation
+        (encoder: OnnxColbertEncoder)
+        (chunkOptions: ChunkOptions)
+        (indexingOptions: IndexingOptions)
+        (tfidfOptions: TfidfOptions)
+        (keywordOptions: KeywordElaborationOptions)
+        (passages: PassageRef list)
+        (progress: (IndexProgress -> unit) option)
+        (cancellationToken: CancellationToken)
+        =
+        async {
+            cancellationToken.ThrowIfCancellationRequested()
+            let! passages = elaborateKeywords keywordOptions passages
+            cancellationToken.ThrowIfCancellationRequested()
+            let! indexed = indexPassages encoder indexingOptions passages progress cancellationToken
+            cancellationToken.ThrowIfCancellationRequested()
 
             return
                 { config = encoder.Config
@@ -244,6 +278,25 @@ module IndexBuilder =
             passages
             progress
 
+    let createFromPassagesWithOptionsAndTfidfOptionsWithCancellation
+        (encoder: OnnxColbertEncoder)
+        (chunkOptions: ChunkOptions)
+        (indexingOptions: IndexingOptions)
+        (tfidfOptions: TfidfOptions)
+        (passages: PassageRef list)
+        (progress: (IndexProgress -> unit) option)
+        (cancellationToken: CancellationToken)
+        =
+        createFromPassagesWithOptionsAndTfidfOptionsAndKeywordElaborationOptionsWithCancellation
+            encoder
+            chunkOptions
+            indexingOptions
+            tfidfOptions
+            KeywordElaborationOptions.disabled
+            passages
+            progress
+            cancellationToken
+
     let createFromPassagesWithOptions
         (encoder: OnnxColbertEncoder)
         (chunkOptions: ChunkOptions)
@@ -259,6 +312,23 @@ module IndexBuilder =
             passages
             progress
 
+    let createFromPassagesWithOptionsWithCancellation
+        (encoder: OnnxColbertEncoder)
+        (chunkOptions: ChunkOptions)
+        (indexingOptions: IndexingOptions)
+        (passages: PassageRef list)
+        (progress: (IndexProgress -> unit) option)
+        (cancellationToken: CancellationToken)
+        =
+        createFromPassagesWithOptionsAndTfidfOptionsWithCancellation
+            encoder
+            chunkOptions
+            indexingOptions
+            TfidfOptions.defaults
+            passages
+            progress
+            cancellationToken
+
     let createFromPassages
         (encoder: OnnxColbertEncoder)
         (chunkOptions: ChunkOptions)
@@ -266,6 +336,21 @@ module IndexBuilder =
         (progress: (IndexProgress -> unit) option)
         =
         createFromPassagesWithOptions encoder chunkOptions IndexingOptions.defaults passages progress
+
+    let createFromPassagesWithCancellation
+        (encoder: OnnxColbertEncoder)
+        (chunkOptions: ChunkOptions)
+        (passages: PassageRef list)
+        (progress: (IndexProgress -> unit) option)
+        (cancellationToken: CancellationToken)
+        =
+        createFromPassagesWithOptionsWithCancellation
+            encoder
+            chunkOptions
+            IndexingOptions.defaults
+            passages
+            progress
+            cancellationToken
 
 module Search =
     let private candidatePassages options (index: ColbertIndex) queryText searchTerms =
