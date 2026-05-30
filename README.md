@@ -16,7 +16,7 @@ The library currently provides:
 - Binary `.fsci` index persistence and index bundle manifests.
 - Docling-compatible document types, JSON serialization, passage conversion, and a standard hybrid assembly pipeline.
 - ONNX helpers for Docling layout detection and figure classification models.
-- Thin integration helpers for FsKame-style PDF source and context rendering workflows.
+- Thin integration helpers for [FsVoice](https://github.com/fwaris/FsVoice)-style PDF source and context rendering workflows.
 
 FsColbert does not reference FsKame, .NET MAUI, or app UI types. Host applications own
 storage, source selection, OCR/rasterization providers, and any user-facing lifecycle.
