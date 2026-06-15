@@ -38,6 +38,9 @@ module PassageContext =
     let deterministicKeywords (passage: PassageRef) =
         distinctNonEmpty
             [ yield! passage.sectionPath
+              yield! passage.layoutLabels
+              yield! (passage.layoutLabels |> List.map (fun label -> label.Replace("_", " ")))
+              yield! passage.captions
               yield PassageContentRole.displayName passage.contentRole
               yield PassageContentRole.storageValue passage.contentRole
               yield! roleKeywords passage.contentRole
@@ -48,6 +51,8 @@ module PassageContext =
     let contextualText (passage: PassageRef) =
         let sectionPath = String.concat " > " passage.sectionPath
         let pageNumbers = passage.pageNumbers |> List.map string |> String.concat ", "
+        let captions = passage.captions |> distinctNonEmpty
+        let captionText = String.concat " | " captions
 
         let metadata =
             [ yield $"Document: {passage.sourceDisplayName}"
@@ -59,7 +64,10 @@ module PassageContext =
               | _ -> yield $"Section: {sectionPath}"
               match passage.pageNumbers with
               | [] -> ()
-              | _ -> yield $"Pages: {pageNumbers}" ]
+              | _ -> yield $"Pages: {pageNumbers}"
+              match captions with
+              | [] -> ()
+              | _ -> yield $"Captions: {captionText}" ]
 
         match metadata with
         | [] -> passage.text

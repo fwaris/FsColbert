@@ -148,8 +148,17 @@ module DocumentContentRoles =
               "answer: [na]"
               "answer: [yes]"
               "answer: [no]"
+              "the answer na means"
+              "the answer yes means"
+              "the answer no means"
               "guidelines:"
+              "justification:"
               "authors should"
+              "authors are encouraged"
+              "the authors are encouraged"
+              "do not remove the checklist"
+              "desk rejected"
+              "at submission time"
               "genai usage disclosure" ]
             text
 
@@ -173,7 +182,7 @@ module DocumentContentRoles =
             PassageContentRole.Unknown
 
 module DocumentChunking =
-    let representationVersion = "pdf-section-aware-v3"
+    let representationVersion = "pdf-layout-overlay-v1"
 
     type SectionBlocks =
         { heading: string option
@@ -301,6 +310,8 @@ module DocumentChunking =
               sectionPath = chunk.sectionPath
               contentRole = chunk.contentRole
               pageNumbers = chunk.pageNumbers
+              layoutLabels = []
+              captions = []
               keywords = [] })
 
     let passagesFromSections
@@ -319,6 +330,8 @@ module DocumentChunking =
               sectionPath = chunk.sectionPath
               contentRole = chunk.contentRole
               pageNumbers = chunk.pageNumbers
+              layoutLabels = []
+              captions = []
               keywords = [] })
 
 type PdfReadOptions =

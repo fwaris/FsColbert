@@ -184,6 +184,8 @@ type PassageRef =
       sectionPath: string list
       contentRole: PassageContentRole
       pageNumbers: int list
+      layoutLabels: string list
+      captions: string list
       keywords: string list }
 
 type PassageKeywordResult =

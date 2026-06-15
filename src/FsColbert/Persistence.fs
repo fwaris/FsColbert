@@ -6,7 +6,7 @@ open System.IO
 
 module IndexPersistence =
     let private magic = "FSCOLBERT-IDX"
-    let private version = 5
+    let private version = 6
     let private minimumReadableVersion = 2
 
     let private writeConfig (writer: BinaryWriter) (config: EncoderConfig) =
@@ -184,6 +184,8 @@ module IndexPersistence =
             writeStringList writer passage.reference.sectionPath
             writer.Write(PassageContentRole.storageValue passage.reference.contentRole)
             writeIntList writer passage.reference.pageNumbers
+            writeStringList writer passage.reference.layoutLabels
+            writeStringList writer passage.reference.captions
             writer.Write passage.terms.Count
 
             for term in passage.terms do
@@ -241,6 +243,8 @@ module IndexPersistence =
                           PassageContentRole.Unknown
 
                   let pageNumbers = if fileVersion >= 5 then readIntList reader else []
+                  let layoutLabels = if fileVersion >= 6 then readStringList reader else []
+                  let captions = if fileVersion >= 6 then readStringList reader else []
 
                   let reference =
                       { sourceId = sourceId
@@ -251,6 +255,8 @@ module IndexPersistence =
                         sectionPath = sectionPath
                         contentRole = contentRole
                         pageNumbers = pageNumbers
+                        layoutLabels = layoutLabels
+                        captions = captions
                         keywords = keywords }
 
                   let terms =
