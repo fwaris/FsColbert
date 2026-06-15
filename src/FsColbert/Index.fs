@@ -4,6 +4,67 @@ open System
 open System.Threading
 open FSharp.Control
 
+module PassageContext =
+    let private distinctNonEmpty values =
+        values
+        |> Seq.choose (fun value ->
+            let trimmed = Text.normalizeWhitespace value
+
+            if String.IsNullOrWhiteSpace trimmed then
+                None
+            else
+                Some trimmed)
+        |> Seq.distinctBy _.ToLowerInvariant()
+        |> Seq.toList
+
+    let private roleKeywords =
+        function
+        | PassageContentRole.Unknown -> []
+        | PassageContentRole.FrontMatter -> [ "front matter"; "title"; "authors"; "paper metadata"; "paper authors" ]
+        | PassageContentRole.Abstract -> [ "abstract"; "paper abstract"; "summary" ]
+        | PassageContentRole.MainBody -> [ "main body"; "paper body"; "content" ]
+        | PassageContentRole.References -> [ "references"; "bibliography"; "citations" ]
+        | PassageContentRole.Appendix -> [ "appendix"; "supplementary material" ]
+        | PassageContentRole.SubmissionChecklist ->
+            [ "submission checklist"
+              "paper checklist"
+              "compliance"
+              "guidelines"
+              "disclosure"
+              "neurips"
+              "question"
+              "answer" ]
+
+    let deterministicKeywords (passage: PassageRef) =
+        distinctNonEmpty
+            [ yield! passage.sectionPath
+              yield PassageContentRole.displayName passage.contentRole
+              yield PassageContentRole.storageValue passage.contentRole
+              yield! roleKeywords passage.contentRole
+              if not (List.isEmpty passage.pageNumbers) then
+                  yield "page"
+                  yield "pages" ]
+
+    let contextualText (passage: PassageRef) =
+        let sectionPath = String.concat " > " passage.sectionPath
+        let pageNumbers = passage.pageNumbers |> List.map string |> String.concat ", "
+
+        let metadata =
+            [ yield $"Document: {passage.sourceDisplayName}"
+              match passage.contentRole with
+              | PassageContentRole.Unknown -> ()
+              | role -> yield $"Role: {PassageContentRole.displayName role}"
+              match passage.sectionPath with
+              | [] -> ()
+              | _ -> yield $"Section: {sectionPath}"
+              match passage.pageNumbers with
+              | [] -> ()
+              | _ -> yield $"Pages: {pageNumbers}" ]
+
+        match metadata with
+        | [] -> passage.text
+        | _ -> String.concat "\n" metadata + "\n\n" + passage.text
+
 module IndexBuilder =
     let private allPassages options (sources: SourceDocument list) =
         sources |> List.filter _.enabled |> List.collect (Text.splitPassages options)
@@ -74,6 +135,18 @@ module IndexBuilder =
                 return generated |> List.collect id |> applyKeywordResults keywordOptions passages
         }
 
+    let private applyDeterministicContextKeywords (passages: PassageRef list) =
+        passages
+        |> List.map (fun passage ->
+            { passage with
+                keywords =
+                    seq {
+                        yield! passage.keywords
+                        yield! PassageContext.deterministicKeywords passage
+                    }
+                    |> Seq.toList
+                    |> cleanKeywords 64 })
+
     let private indexBatch
         (encoder: OnnxColbertEncoder)
         (cancellationToken: CancellationToken)
@@ -81,17 +154,22 @@ module IndexBuilder =
         =
         async {
             cancellationToken.ThrowIfCancellationRequested()
-            let texts = batch |> Array.map (fun (_, passage) -> passage.text)
+
+            let texts =
+                batch |> Array.map (fun (_, passage) -> PassageContext.contextualText passage)
+
             let! encoded = encoder.EncodeDocumentsAsync texts
             cancellationToken.ThrowIfCancellationRequested()
 
             return
                 Array.zip batch encoded
                 |> Array.map (fun ((ordinal, passage), encoded) ->
+                    let contextualText = PassageContext.contextualText passage
+
                     ordinal,
                     { reference = passage
                       embedding = encoded.embedding
-                      terms = Text.terms passage.text })
+                      terms = Text.terms contextualText })
         }
 
     let private reportProgress progress completed total currentSource =
@@ -165,6 +243,7 @@ module IndexBuilder =
         =
         async {
             let! passages = allPassages options sources |> elaborateKeywords keywordOptions
+            let passages = applyDeterministicContextKeywords passages
             let! indexed = indexPassages encoder indexingOptions passages progress CancellationToken.None
 
             return
@@ -224,6 +303,7 @@ module IndexBuilder =
         =
         async {
             let! passages = elaborateKeywords keywordOptions passages
+            let passages = applyDeterministicContextKeywords passages
             let! indexed = indexPassages encoder indexingOptions passages progress CancellationToken.None
 
             return
@@ -248,6 +328,7 @@ module IndexBuilder =
         async {
             cancellationToken.ThrowIfCancellationRequested()
             let! passages = elaborateKeywords keywordOptions passages
+            let passages = applyDeterministicContextKeywords passages
             cancellationToken.ThrowIfCancellationRequested()
             let! indexed = indexPassages encoder indexingOptions passages progress cancellationToken
             cancellationToken.ThrowIfCancellationRequested()

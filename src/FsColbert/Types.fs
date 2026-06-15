@@ -128,6 +128,53 @@ type PreChunkedDocument =
       chunks: string list
       enabled: bool }
 
+[<RequireQualifiedAccess>]
+type PassageContentRole =
+    | Unknown
+    | FrontMatter
+    | Abstract
+    | MainBody
+    | References
+    | Appendix
+    | SubmissionChecklist
+
+module PassageContentRole =
+    let storageValue =
+        function
+        | PassageContentRole.Unknown -> "unknown"
+        | PassageContentRole.FrontMatter -> "front_matter"
+        | PassageContentRole.Abstract -> "abstract"
+        | PassageContentRole.MainBody -> "main_body"
+        | PassageContentRole.References -> "references"
+        | PassageContentRole.Appendix -> "appendix"
+        | PassageContentRole.SubmissionChecklist -> "submission_checklist"
+
+    let displayName =
+        function
+        | PassageContentRole.Unknown -> "Unknown"
+        | PassageContentRole.FrontMatter -> "Front matter"
+        | PassageContentRole.Abstract -> "Abstract"
+        | PassageContentRole.MainBody -> "Main body"
+        | PassageContentRole.References -> "References"
+        | PassageContentRole.Appendix -> "Appendix"
+        | PassageContentRole.SubmissionChecklist -> "Submission checklist"
+
+    let ofStorageValue value =
+        match (defaultArg (Option.ofObj value) "").Trim().ToLowerInvariant() with
+        | "front_matter"
+        | "frontmatter"
+        | "front matter" -> PassageContentRole.FrontMatter
+        | "abstract" -> PassageContentRole.Abstract
+        | "main_body"
+        | "mainbody"
+        | "main body" -> PassageContentRole.MainBody
+        | "references" -> PassageContentRole.References
+        | "appendix" -> PassageContentRole.Appendix
+        | "submission_checklist"
+        | "submissionchecklist"
+        | "submission checklist" -> PassageContentRole.SubmissionChecklist
+        | _ -> PassageContentRole.Unknown
+
 type PassageRef =
     { sourceId: string
       sourceDisplayName: string
@@ -135,6 +182,8 @@ type PassageRef =
       index: int
       text: string
       sectionPath: string list
+      contentRole: PassageContentRole
+      pageNumbers: int list
       keywords: string list }
 
 type PassageKeywordResult =

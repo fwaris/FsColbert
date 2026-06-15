@@ -6,7 +6,7 @@ open System.IO
 
 module IndexPersistence =
     let private magic = "FSCOLBERT-IDX"
-    let private version = 4
+    let private version = 5
     let private minimumReadableVersion = 2
 
     let private writeConfig (writer: BinaryWriter) (config: EncoderConfig) =
@@ -106,6 +106,16 @@ module IndexPersistence =
         [ for _ = 1 to reader.ReadInt32() do
               reader.ReadString() ]
 
+    let private writeIntList (writer: BinaryWriter) (values: int list) =
+        writer.Write values.Length
+
+        for value in values do
+            writer.Write value
+
+    let private readIntList (reader: BinaryReader) =
+        [ for _ = 1 to reader.ReadInt32() do
+              reader.ReadInt32() ]
+
     let private writeTfidf (writer: BinaryWriter) (index: TfidfIndex) =
         writer.Write index.passageCount
         writer.Write index.averageDocumentLength
@@ -172,6 +182,8 @@ module IndexPersistence =
             writer.Write passage.reference.text
             writeStringList writer passage.reference.keywords
             writeStringList writer passage.reference.sectionPath
+            writer.Write(PassageContentRole.storageValue passage.reference.contentRole)
+            writeIntList writer passage.reference.pageNumbers
             writer.Write passage.terms.Count
 
             for term in passage.terms do
@@ -222,6 +234,14 @@ module IndexPersistence =
 
                   let sectionPath = if fileVersion >= 4 then readStringList reader else []
 
+                  let contentRole =
+                      if fileVersion >= 5 then
+                          reader.ReadString() |> PassageContentRole.ofStorageValue
+                      else
+                          PassageContentRole.Unknown
+
+                  let pageNumbers = if fileVersion >= 5 then readIntList reader else []
+
                   let reference =
                       { sourceId = sourceId
                         sourceDisplayName = sourceDisplayName
@@ -229,6 +249,8 @@ module IndexPersistence =
                         index = index
                         text = text
                         sectionPath = sectionPath
+                        contentRole = contentRole
+                        pageNumbers = pageNumbers
                         keywords = keywords }
 
                   let terms =

@@ -122,6 +122,56 @@ module DocumentSections =
         String.Equals(normalizedName requested, normalizedName heading, StringComparison.Ordinal)
         || nearlyMatches requested heading
 
+module DocumentContentRoles =
+    let private containsAny (needles: string list) (text: string) =
+        let text = Text.normalizeWhitespace text |> fun value -> value.ToLowerInvariant()
+
+        needles
+        |> List.exists (fun needle -> text.Contains(needle, StringComparison.OrdinalIgnoreCase))
+
+    let private normalizedSections sectionPath =
+        sectionPath |> List.map DocumentSections.normalizedName
+
+    let private hasSectionPrefix prefixes sectionPath =
+        normalizedSections sectionPath
+        |> List.exists (fun section -> prefixes |> List.exists (fun (prefix: string) -> section.StartsWith prefix))
+
+    let private hasSectionName names sectionPath =
+        let names = names |> Set.ofList
+        normalizedSections sectionPath |> List.exists names.Contains
+
+    let isSubmissionChecklistText text =
+        containsAny
+            [ "neurips paper checklist"
+              "paper checklist"
+              "question: do the main claims"
+              "answer: [na]"
+              "answer: [yes]"
+              "answer: [no]"
+              "guidelines:"
+              "authors should"
+              "genai usage disclosure" ]
+            text
+
+    let infer sectionPath text =
+        if
+            isSubmissionChecklistText text
+            || hasSectionName [ "neurips paper checklist"; "genai usage disclosure" ] sectionPath
+        then
+            PassageContentRole.SubmissionChecklist
+        elif hasSectionName [ "abstract" ] sectionPath then
+            PassageContentRole.Abstract
+        elif hasSectionPrefix [ "references"; "bibliography" ] sectionPath then
+            PassageContentRole.References
+        elif hasSectionPrefix [ "appendix" ] sectionPath then
+            PassageContentRole.Appendix
+        elif not (List.isEmpty sectionPath) then
+            PassageContentRole.MainBody
+        elif String.IsNullOrWhiteSpace(Text.normalizeWhitespace text) then
+            PassageContentRole.Unknown
+        else
+            PassageContentRole.Unknown
+
 module DocumentChunking =
     let representationVersion = "pdf-section-aware-v3"
 
@@ -131,6 +181,8 @@ module DocumentChunking =
 
     type SectionChunk =
         { sectionPath: string list
+          contentRole: PassageContentRole
+          pageNumbers: int list
           text: string }
 
     let chunkBlocks (options: ChunkOptions) (blocks: string list) =
@@ -226,6 +278,8 @@ module DocumentChunking =
                 |> enforceChunkBounds options
                 |> List.map (fun text ->
                     { sectionPath = sectionPath
+                      contentRole = DocumentContentRoles.infer sectionPath text
+                      pageNumbers = []
                       text = text })))
 
     let chunkSections (options: ChunkOptions) (sections: SectionBlocks list) =
@@ -245,6 +299,8 @@ module DocumentChunking =
               index = index
               text = chunk.text
               sectionPath = chunk.sectionPath
+              contentRole = chunk.contentRole
+              pageNumbers = chunk.pageNumbers
               keywords = [] })
 
     let passagesFromSections
@@ -261,6 +317,8 @@ module DocumentChunking =
               index = index
               text = chunk.text
               sectionPath = chunk.sectionPath
+              contentRole = chunk.contentRole
+              pageNumbers = chunk.pageNumbers
               keywords = [] })
 
 type PdfReadOptions =

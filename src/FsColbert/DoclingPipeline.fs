@@ -507,6 +507,8 @@ module DoclingStandardHybrid =
 type DoclingPassageBlock =
     { text: string
       sectionPath: string list
+      contentRole: PassageContentRole
+      pageNumbers: int list
       keywords: string list }
 
 module DoclingPassages =
@@ -581,6 +583,31 @@ module DoclingPassages =
 
     let private sectionKeywords sectionPath = sectionPath |> DoclingKeywords.sanitize
 
+    let private sortedPageNumbers (prov: DoclingProvenance list) =
+        prov
+        |> List.map _.pageNo
+        |> List.filter (fun page -> page > 0)
+        |> List.distinct
+        |> List.sort
+
+    let private roleKeywords role =
+        match role with
+        | PassageContentRole.Unknown -> []
+        | _ -> [ PassageContentRole.displayName role; PassageContentRole.storageValue role ]
+
+    let private roleForText sectionPath (item: DoclingTextItem) =
+        match item.label with
+        | Title -> PassageContentRole.FrontMatter
+        | _ ->
+            match sectionPath with
+            | _ :: [] -> PassageContentRole.FrontMatter
+            | _ -> DocumentContentRoles.infer sectionPath item.text
+
+    let private roleForStructuredBlock sectionPath text =
+        match sectionPath with
+        | _ :: [] -> PassageContentRole.FrontMatter
+        | _ -> DocumentContentRoles.infer sectionPath text
+
     let private tableToText (table: DoclingTableItem) =
         if table.data.numRows = 0 || List.isEmpty table.data.tableCells then
             "[Table]"
@@ -614,30 +641,53 @@ module DoclingPassages =
             block.sectionPath
             |> List.choose normalizeSectionText
             |> DoclingKeywords.sanitize
+          contentRole = block.contentRole
+          pageNumbers =
+            block.pageNumbers
+            |> List.filter (fun page -> page > 0)
+            |> List.distinct
+            |> List.sort
           keywords = DoclingKeywords.sanitize block.keywords }
 
     let private textBlock sectionPath (item: DoclingTextItem) =
+        let role = roleForText sectionPath item
+
         { text = item.text
           sectionPath = sectionPath
+          contentRole = role
+          pageNumbers = sortedPageNumbers item.prov
           keywords =
             DoclingKeywords.weakDefaults item.label [] item.keywords
-            @ sectionKeywords sectionPath }
+            @ sectionKeywords sectionPath
+            @ roleKeywords role }
         |> normalizeBlock
 
     let private tableBlock sectionPath (item: DoclingTableItem) =
-        { text = tableToText item
+        let text = tableToText item
+        let role = roleForStructuredBlock sectionPath text
+
+        { text = text
           sectionPath = sectionPath
+          contentRole = role
+          pageNumbers = sortedPageNumbers item.prov
           keywords =
             DoclingKeywords.weakDefaults item.label [] item.keywords
-            @ sectionKeywords sectionPath }
+            @ sectionKeywords sectionPath
+            @ roleKeywords role }
         |> normalizeBlock
 
     let private pictureBlock sectionPath (item: DoclingPictureItem) =
-        { text = pictureToText item
+        let text = pictureToText item
+        let role = roleForStructuredBlock sectionPath text
+
+        { text = text
           sectionPath = sectionPath
+          contentRole = role
+          pageNumbers = sortedPageNumbers item.prov
           keywords =
             DoclingKeywords.weakDefaults item.label item.classifications item.keywords
-            @ sectionKeywords sectionPath }
+            @ sectionKeywords sectionPath
+            @ roleKeywords role }
         |> normalizeBlock
 
     let toBlocksWithKeywords document =
@@ -681,7 +731,7 @@ module DoclingPassages =
     let toBlocks document =
         document |> toBlocksWithKeywords |> List.map _.text
 
-    let private flushChunk currentTexts currentSectionPath currentKeywords chunks =
+    let private flushChunk currentTexts currentSectionPath currentRole currentPageNumbers currentKeywords chunks =
         match currentTexts with
         | [] -> chunks
         | _ ->
@@ -693,6 +743,8 @@ module DoclingPassages =
             else
                 { text = text
                   sectionPath = currentSectionPath
+                  contentRole = currentRole
+                  pageNumbers = currentPageNumbers |> List.distinct |> List.sort
                   keywords = DoclingKeywords.sanitize currentKeywords }
                 :: chunks
 
@@ -702,41 +754,81 @@ module DoclingPassages =
         |> List.map (fun (_, text) ->
             { text = text
               sectionPath = block.sectionPath
+              contentRole = block.contentRole
+              pageNumbers = block.pageNumbers
               keywords = block.keywords })
 
     let private chunkBlocksWithKeywords options blocks =
         let maxChars = max 1 options.maxChars
 
-        let rec loop remaining currentTexts currentLen currentSectionPath currentKeywords chunks =
+        let rec loop
+            remaining
+            currentTexts
+            currentLen
+            currentSectionPath
+            currentRole
+            currentPageNumbers
+            currentKeywords
+            chunks
+            =
             match remaining with
-            | [] -> flushChunk currentTexts currentSectionPath currentKeywords chunks |> List.rev
+            | [] ->
+                flushChunk currentTexts currentSectionPath currentRole currentPageNumbers currentKeywords chunks
+                |> List.rev
             | block :: rest ->
                 let block = normalizeBlock block
 
                 if String.IsNullOrWhiteSpace block.text then
-                    loop rest currentTexts currentLen currentSectionPath currentKeywords chunks
-                elif currentLen > 0 && block.sectionPath <> currentSectionPath then
-                    let chunks = flushChunk currentTexts currentSectionPath currentKeywords chunks
-                    loop remaining [] 0 [] [] chunks
+                    loop
+                        rest
+                        currentTexts
+                        currentLen
+                        currentSectionPath
+                        currentRole
+                        currentPageNumbers
+                        currentKeywords
+                        chunks
+                elif
+                    currentLen > 0
+                    && (block.sectionPath <> currentSectionPath || block.contentRole <> currentRole)
+                then
+                    let chunks =
+                        flushChunk currentTexts currentSectionPath currentRole currentPageNumbers currentKeywords chunks
+
+                    loop remaining [] 0 [] PassageContentRole.Unknown [] [] chunks
                 elif block.text.Length > maxChars then
-                    let chunks = flushChunk currentTexts currentSectionPath currentKeywords chunks
+                    let chunks =
+                        flushChunk currentTexts currentSectionPath currentRole currentPageNumbers currentKeywords chunks
+
                     let splitChunks = splitLongBlock options block
-                    loop rest [] 0 [] [] (List.rev splitChunks @ chunks)
+                    loop rest [] 0 [] PassageContentRole.Unknown [] [] (List.rev splitChunks @ chunks)
                 elif currentLen = 0 then
-                    loop rest [ block.text ] block.text.Length block.sectionPath block.keywords chunks
+                    loop
+                        rest
+                        [ block.text ]
+                        block.text.Length
+                        block.sectionPath
+                        block.contentRole
+                        block.pageNumbers
+                        block.keywords
+                        chunks
                 elif currentLen + block.text.Length + 2 > maxChars then
-                    let chunks = flushChunk currentTexts currentSectionPath currentKeywords chunks
-                    loop remaining [] 0 [] [] chunks
+                    let chunks =
+                        flushChunk currentTexts currentSectionPath currentRole currentPageNumbers currentKeywords chunks
+
+                    loop remaining [] 0 [] PassageContentRole.Unknown [] [] chunks
                 else
                     loop
                         rest
                         (block.text :: currentTexts)
                         (currentLen + block.text.Length + 2)
                         currentSectionPath
+                        currentRole
+                        (currentPageNumbers @ block.pageNumbers)
                         (currentKeywords @ block.keywords)
                         chunks
 
-        loop blocks [] 0 [] [] []
+        loop blocks [] 0 [] PassageContentRole.Unknown [] [] []
 
     let toPassages (chunkOptions: ChunkOptions) (source: PassageSource) document =
         document
@@ -749,4 +841,6 @@ module DoclingPassages =
               index = index
               text = block.text
               sectionPath = block.sectionPath
+              contentRole = block.contentRole
+              pageNumbers = block.pageNumbers
               keywords = block.keywords })

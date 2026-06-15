@@ -90,6 +90,8 @@ module Text =
               index = index
               text = text
               sectionPath = []
+              contentRole = PassageContentRole.Unknown
+              pageNumbers = []
               keywords = [] })
 
     let passagesFromChunks (source: PreChunkedDocument) : PassageRef list =
@@ -101,4 +103,6 @@ module Text =
               index = index
               text = text
               sectionPath = []
+              contentRole = PassageContentRole.Unknown
+              pageNumbers = []
               keywords = [] })

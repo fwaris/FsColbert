@@ -23,6 +23,8 @@ let private passageWithKeywords sourceId index text keywords embedding =
           index = index
           text = text
           sectionPath = []
+          contentRole = PassageContentRole.Unknown
+          pageNumbers = []
           keywords = keywords }
       embedding = embedding
       terms = Text.terms text }
@@ -38,9 +40,27 @@ let private passageWithSection sourceId index text sectionPath keywords embeddin
           index = index
           text = text
           sectionPath = sectionPath
+          contentRole = PassageContentRole.MainBody
+          pageNumbers = []
           keywords = keywords }
       embedding = embedding
       terms = Text.terms text }
+
+let private passageWithMetadata sourceId index text sectionPath contentRole pageNumbers keywords embedding =
+    let reference =
+        { sourceId = sourceId
+          sourceDisplayName = $"PDF: {sourceId}"
+          sourceLocation = $"/tmp/{sourceId}.pdf"
+          index = index
+          text = text
+          sectionPath = sectionPath
+          contentRole = contentRole
+          pageNumbers = pageNumbers
+          keywords = keywords }
+
+    { reference = reference
+      embedding = embedding
+      terms = Text.terms (PassageContext.contextualText reference) }
 
 type private StaticKeywordGenerator(results: PassageKeywordResult list) =
     interface IPassageKeywordGenerator with
@@ -163,6 +183,37 @@ let private writeVersion3Index path (idx: ColbertIndex) =
         writer.Write passage.reference.index
         writer.Write passage.reference.text
         writeStringList writer passage.reference.keywords
+        writer.Write passage.terms.Count
+
+        for term in passage.terms do
+            writer.Write term
+
+        writeVector writer passage.embedding
+
+    writeTfidf writer idx.tfidf
+
+let private writeVersion4Index path (idx: ColbertIndex) =
+    use stream = File.Create path
+    use writer = new BinaryWriter(stream)
+    writer.Write "FSCOLBERT-IDX"
+    writer.Write 4
+    writeConfig writer idx.config
+    writer.Write idx.chunkOptions.maxChars
+    writer.Write idx.chunkOptions.overlapChars
+    writer.Write idx.chunkOptions.minChars
+    writer.Write idx.tfidfOptions.textWeight
+    writer.Write idx.tfidfOptions.keywordWeight
+    writer.Write(idx.createdAt.ToUnixTimeMilliseconds())
+    writer.Write idx.passages.Length
+
+    for passage in idx.passages do
+        writer.Write passage.reference.sourceId
+        writer.Write passage.reference.sourceDisplayName
+        writer.Write passage.reference.sourceLocation
+        writer.Write passage.reference.index
+        writer.Write passage.reference.text
+        writeStringList writer passage.reference.keywords
+        writeStringList writer passage.reference.sectionPath
         writer.Write passage.terms.Count
 
         for term in passage.terms do
@@ -372,6 +423,8 @@ let ``keyword elaboration generator attaches generated terms before tfidf build`
                 index = 0
                 text = "benefits waiting period details"
                 sectionPath = []
+                contentRole = PassageContentRole.Unknown
+                pageNumbers = []
                 keywords = [] } ]
 
         let generator =
@@ -446,11 +499,13 @@ let ``queryEncodedWithSearchTerms uses supplied terms for candidates but origina
 [<Fact>]
 let ``persistence round trips an index`` () =
     let passage =
-        passageWithSection
+        passageWithMetadata
             "pdf-1"
             0
             "The system indexes local PDF passages."
             [ "Guide"; "Claims" ]
+            PassageContentRole.MainBody
+            [ 2; 3 ]
             [ "insurance claims"; "policy support" ]
             (vector [| 1; 2 |] [| 1.0f; 0.0f; 0.0f; 1.0f |])
 
@@ -466,6 +521,8 @@ let ``persistence round trips an index`` () =
         Assert.Equal("PDF: pdf-1", loaded.passages.Head.reference.sourceDisplayName)
         Assert.Equal<string list>([ "insurance claims"; "policy support" ], loaded.passages.Head.reference.keywords)
         Assert.Equal<string list>([ "Guide"; "Claims" ], loaded.passages.Head.reference.sectionPath)
+        Assert.Equal(PassageContentRole.MainBody, loaded.passages.Head.reference.contentRole)
+        Assert.Equal<int list>([ 2; 3 ], loaded.passages.Head.reference.pageNumbers)
         Assert.Equal(TfidfOptions.defaults.keywordWeight, loaded.tfidfOptions.keywordWeight)
         Assert.Equal<float32 array>(passage.embedding.vectors, loaded.passages.Head.embedding.vectors)
         Assert.Equal(1, loaded.tfidf.passageCount)
@@ -496,6 +553,8 @@ let ``persistence loads version 2 indexes with empty keywords`` () =
         Assert.Equal(1, loaded.passages.Length)
         Assert.Empty loaded.passages.Head.reference.keywords
         Assert.Empty loaded.passages.Head.reference.sectionPath
+        Assert.Equal(PassageContentRole.Unknown, loaded.passages.Head.reference.contentRole)
+        Assert.Empty loaded.passages.Head.reference.pageNumbers
         Assert.Equal(TfidfOptions.defaults.textWeight, loaded.tfidfOptions.textWeight)
         Assert.Equal(TfidfOptions.defaults.keywordWeight, loaded.tfidfOptions.keywordWeight)
         Assert.True(loaded.tfidf.vocabulary.ContainsKey "prior")
@@ -522,7 +581,35 @@ let ``persistence loads version 3 indexes with empty section path`` () =
 
         Assert.Equal<string list>([ "legacy keyword" ], loaded.passages.Head.reference.keywords)
         Assert.Empty loaded.passages.Head.reference.sectionPath
+        Assert.Equal(PassageContentRole.Unknown, loaded.passages.Head.reference.contentRole)
+        Assert.Empty loaded.passages.Head.reference.pageNumbers
         Assert.True(loaded.tfidf.vocabulary.ContainsKey "legacy")
+    finally
+        if IO.File.Exists path then
+            IO.File.Delete path
+
+[<Fact>]
+let ``persistence loads version 4 indexes with empty content role and pages`` () =
+    let oldIndex =
+        index
+            [ passageWithSection
+                  "old-pdf"
+                  0
+                  "The version four index format had section context but no role metadata."
+                  [ "Paper"; "Abstract" ]
+                  [ "abstract" ]
+                  (vector [| 1; 2 |] [| 1.0f; 0.0f; 0.0f; 1.0f |]) ]
+
+    let path = IO.Path.Combine(IO.Path.GetTempPath(), $"{Guid.NewGuid():N}.fsci")
+
+    try
+        writeVersion4Index path oldIndex
+        let loaded = IndexPersistence.load path
+
+        Assert.Equal<string list>([ "Paper"; "Abstract" ], loaded.passages.Head.reference.sectionPath)
+        Assert.Equal(PassageContentRole.Unknown, loaded.passages.Head.reference.contentRole)
+        Assert.Empty loaded.passages.Head.reference.pageNumbers
+        Assert.True(loaded.tfidf.vocabulary.ContainsKey "role")
     finally
         if IO.File.Exists path then
             IO.File.Delete path
@@ -1037,6 +1124,92 @@ let ``docling passages inherit structured section context`` () =
     Assert.Equal<string list>([ "A-Mem: Agentic Memory for LLM Agents"; "Limitations" ], limitations.sectionPath)
 
 [<Fact>]
+let ``docling passages infer content roles and page numbers`` () =
+    let prov pageNo =
+        [ { pageNo = pageNo
+            bbox = DoclingGeometry.topLeftBox 0.0 0.0 100.0 20.0
+            charSpan = None } ]
+
+    let textItem selfRef label text pageNo =
+        { selfRef = selfRef
+          parent = "#/body"
+          label = label
+          text = text
+          orig = text
+          contentLayer = Body
+          prov = prov pageNo
+          keywords = []
+          sourceId = Some "doc"
+          sourceDisplayName = Some "Doc" }
+
+    let document: DoclingDocument =
+        { name = "doc"
+          originFileName = None
+          originMimeType = None
+          pages =
+            [ for pageNo in 1..6 ->
+                  pageNo,
+                  { pageNo = pageNo
+                    size = { width = 100.0; height = 100.0 } } ]
+            |> Map.ofList
+          texts =
+            [ textItem "#/texts/0" Title "A-Mem: Agentic Memory for LLM Agents" 1
+              textItem "#/texts/1" Text "Wujiang Xu, Zujie Liang, Juntao Tan" 1
+              textItem "#/texts/2" SectionHeader "Abstract" 1
+              textItem "#/texts/3" Text "This paper introduces agentic memory." 1
+              textItem "#/texts/4" SectionHeader "1 Introduction" 2
+              textItem "#/texts/5" Text "The introduction motivates memory systems." 2
+              textItem "#/texts/6" SectionHeader "References" 4
+              textItem "#/texts/7" Text "Beltagy et al. Longformer." 4
+              textItem "#/texts/8" SectionHeader "Appendix A Extra Details" 5
+              textItem "#/texts/9" Text "Supplementary experiment notes." 5
+              textItem "#/texts/10" SectionHeader "NeurIPS Paper Checklist" 6
+              textItem
+                  "#/texts/11"
+                  Text
+                  "Question: Do the main claims made in the abstract and introduction accurately reflect the paper's contributions? Answer: [Yes] Guidelines: Authors should answer carefully."
+                  6 ]
+          tables = []
+          pictures = []
+          bodyChildren = [ for index in 0..11 -> $"#/texts/{index}" ]
+          furnitureChildren = [] }
+
+    let source = PassageSource.create "doc" "Doc" "/tmp/doc.pdf"
+
+    let passages =
+        DoclingPassages.toPassages ChunkOptions.fsKameDefaults source document
+
+    let frontMatter =
+        passages |> List.find (fun passage -> passage.text.Contains("Wujiang Xu"))
+
+    let abstractPassage =
+        passages |> List.find (fun passage -> passage.text.Contains("agentic memory"))
+
+    let body =
+        passages |> List.find (fun passage -> passage.text.Contains("motivates memory"))
+
+    let references =
+        passages |> List.find (fun passage -> passage.text.Contains("Longformer"))
+
+    let appendix =
+        passages |> List.find (fun passage -> passage.text.Contains("Supplementary"))
+
+    let checklist =
+        passages
+        |> List.find (fun passage -> passage.text.Contains("Question: Do the main claims"))
+
+    Assert.Equal(PassageContentRole.FrontMatter, frontMatter.contentRole)
+    Assert.Equal<int list>([ 1 ], frontMatter.pageNumbers)
+    Assert.Equal(PassageContentRole.Abstract, abstractPassage.contentRole)
+    Assert.Equal<int list>([ 1 ], abstractPassage.pageNumbers)
+    Assert.Equal(PassageContentRole.MainBody, body.contentRole)
+    Assert.Equal<int list>([ 2 ], body.pageNumbers)
+    Assert.Equal(PassageContentRole.References, references.contentRole)
+    Assert.Equal(PassageContentRole.Appendix, appendix.contentRole)
+    Assert.Equal(PassageContentRole.SubmissionChecklist, checklist.contentRole)
+    Assert.Equal<int list>([ 6 ], checklist.pageNumbers)
+
+[<Fact>]
 let ``docling numbered heading jumps do not inherit unrelated parents`` () =
     let textItem selfRef label text =
         { selfRef = selfRef
@@ -1101,6 +1274,66 @@ let ``section path keywords participate in tfidf retrieval`` () =
         Tfidf.scoreQuery idx.tfidf "empirical results" |> Tfidf.topCandidates 10
 
     Assert.Single candidates |> ignore
+    Assert.Equal(0, fst candidates[0])
+
+[<Fact>]
+let ``contextual text includes document role section pages and raw text`` () =
+    let passage =
+        { sourceId = "doc"
+          sourceDisplayName = "A-Mem Paper"
+          sourceLocation = "/tmp/amem.pdf"
+          index = 3
+          text = "LoCoMo and DialSim are the datasets."
+          sectionPath = [ "A-Mem"; "4 Experiment"; "4.1 Datasets" ]
+          contentRole = PassageContentRole.MainBody
+          pageNumbers = [ 6; 7 ]
+          keywords = [] }
+
+    let contextual = PassageContext.contextualText passage
+
+    Assert.Contains("Document: A-Mem Paper", contextual)
+    Assert.Contains("Role: Main body", contextual)
+    Assert.Contains("Section: A-Mem > 4 Experiment > 4.1 Datasets", contextual)
+    Assert.Contains("Pages: 6, 7", contextual)
+    Assert.Contains("LoCoMo and DialSim are the datasets.", contextual)
+
+[<Fact>]
+let ``deterministic context keywords rank paper authors above checklist boilerplate`` () =
+    let enrich (passage: IndexedPassage) =
+        let reference =
+            { passage.reference with
+                keywords =
+                    passage.reference.keywords
+                    @ PassageContext.deterministicKeywords passage.reference }
+
+        { passage with reference = reference }
+
+    let frontMatter =
+        passageWithMetadata
+            "amem"
+            0
+            "A-Mem: Agentic Memory for LLM Agents. Wujiang Xu, Zujie Liang, Juntao Tan."
+            [ "A-Mem: Agentic Memory for LLM Agents" ]
+            PassageContentRole.FrontMatter
+            [ 1 ]
+            []
+            (vector [| 1 |] [| 1.0f; 0.0f |])
+
+    let checklist =
+        passageWithMetadata
+            "amem"
+            1
+            "NeurIPS Paper Checklist. Guidelines: Authors should answer each question and ensure the paper satisfies the checklist."
+            [ "A-Mem: Agentic Memory for LLM Agents"; "NeurIPS Paper Checklist" ]
+            PassageContentRole.SubmissionChecklist
+            [ 24 ]
+            []
+            (vector [| 1 |] [| 0.0f; 1.0f |])
+
+    let idx = index [ enrich frontMatter; enrich checklist ]
+
+    let candidates = Tfidf.scoreQuery idx.tfidf "paper authors" |> Tfidf.topCandidates 2
+
     Assert.Equal(0, fst candidates[0])
 
 [<Fact>]
