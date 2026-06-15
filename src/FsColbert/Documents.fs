@@ -115,18 +115,23 @@ module DocumentSections =
 
         not (String.IsNullOrWhiteSpace requestedName)
         && not (String.IsNullOrWhiteSpace headingName)
-        && levenshtein.Distance(requestedName, headingName) <= maxEditDistance (max requestedName.Length headingName.Length)
+        && levenshtein.Distance(requestedName, headingName)
+           <= maxEditDistance (max requestedName.Length headingName.Length)
 
     let matches requested heading =
         String.Equals(normalizedName requested, normalizedName heading, StringComparison.Ordinal)
         || nearlyMatches requested heading
 
 module DocumentChunking =
-    let representationVersion = "pdf-section-aware-v2"
+    let representationVersion = "pdf-section-aware-v3"
 
     type SectionBlocks =
         { heading: string option
           blocks: string list }
+
+    type SectionChunk =
+        { sectionPath: string list
+          text: string }
 
     let chunkBlocks (options: ChunkOptions) (blocks: string list) =
         let maxChars = max 1 options.maxChars
@@ -201,28 +206,45 @@ module DocumentChunking =
         else
             [ chunk ]
 
-    let chunkSections (options: ChunkOptions) (sections: SectionBlocks list) =
+    let private sectionPath (heading: string option) =
+        match heading with
+        | None -> []
+        | Some(heading: string) ->
+            heading.Split(" > ", StringSplitOptions.TrimEntries ||| StringSplitOptions.RemoveEmptyEntries)
+            |> Array.toList
+
+    let private chunkSectionsWithContext (options: ChunkOptions) (sections: SectionBlocks list) =
         sections
         |> List.collect (fun section ->
+            let sectionPath = sectionPath section.heading
+
             section.blocks
             |> chunkBlocks options
             |> List.collect (fun chunk ->
                 chunk
                 |> DocumentSections.formatChunk section.heading
-                |> enforceChunkBounds options))
+                |> enforceChunkBounds options
+                |> List.map (fun text ->
+                    { sectionPath = sectionPath
+                      text = text })))
+
+    let chunkSections (options: ChunkOptions) (sections: SectionBlocks list) =
+        sections |> chunkSectionsWithContext options |> List.map _.text
 
     let chunkSectionedBlocks (options: ChunkOptions) (blocks: string list) =
         blocks |> splitIntoSections |> chunkSections options
 
     let passagesFromBlocks (options: ChunkOptions) (source: PassageSource) (blocks: string list) : PassageRef list =
         blocks
-        |> chunkSectionedBlocks options
-        |> List.mapi (fun index text ->
+        |> splitIntoSections
+        |> chunkSectionsWithContext options
+        |> List.mapi (fun index chunk ->
             { sourceId = source.id
               sourceDisplayName = source.displayName
               sourceLocation = source.location
               index = index
-              text = text
+              text = chunk.text
+              sectionPath = chunk.sectionPath
               keywords = [] })
 
     let passagesFromSections
@@ -231,13 +253,14 @@ module DocumentChunking =
         (sections: SectionBlocks list)
         : PassageRef list =
         sections
-        |> chunkSections options
-        |> List.mapi (fun index text ->
+        |> chunkSectionsWithContext options
+        |> List.mapi (fun index chunk ->
             { sourceId = source.id
               sourceDisplayName = source.displayName
               sourceLocation = source.location
               index = index
-              text = text
+              text = chunk.text
+              sectionPath = chunk.sectionPath
               keywords = [] })
 
 type PdfReadOptions =
@@ -322,12 +345,13 @@ module PdfDocuments =
         readPassagesWithOptions PdfReadOptions.defaults chunkOptions source path
 
 module MarkdownDocuments =
-    let private headingPattern = Regex(@"^(#{1,6})\s+(.+?)\s*#*\s*$", RegexOptions.Compiled)
+    let private headingPattern =
+        Regex(@"^(#{1,6})\s+(.+?)\s*#*\s*$", RegexOptions.Compiled)
+
     let private unorderedListPattern = Regex(@"^\s*[-+*]\s+", RegexOptions.Compiled)
     let private orderedListPattern = Regex(@"^\s*\d+[.)]\s+", RegexOptions.Compiled)
 
-    let private normalizeLine (line: string) =
-        line.Replace("\t", "    ").TrimEnd()
+    let private normalizeLine (line: string) = line.Replace("\t", "    ").TrimEnd()
 
     let private stripInlineMarkup (text: string) =
         text
@@ -355,24 +379,24 @@ module MarkdownDocuments =
 
     let private isFence (line: string) =
         let trimmed = line.TrimStart()
-        trimmed.StartsWith("```", StringComparison.Ordinal) || trimmed.StartsWith("~~~", StringComparison.Ordinal)
+
+        trimmed.StartsWith("```", StringComparison.Ordinal)
+        || trimmed.StartsWith("~~~", StringComparison.Ordinal)
 
     let private isListLine (line: string) =
         unorderedListPattern.IsMatch(line) || orderedListPattern.IsMatch(line)
 
     let private isTableLine (line: string) =
         let trimmed = line.Trim()
-        trimmed.StartsWith("|", StringComparison.Ordinal) && trimmed.EndsWith("|", StringComparison.Ordinal)
+
+        trimmed.StartsWith("|", StringComparison.Ordinal)
+        && trimmed.EndsWith("|", StringComparison.Ordinal)
 
     let private addBlock lines blocks =
         match lines with
         | [] -> blocks
         | _ ->
-            let block =
-                lines
-                |> List.rev
-                |> String.concat "\n"
-                |> Text.normalizeWhitespace
+            let block = lines |> List.rev |> String.concat "\n" |> Text.normalizeWhitespace
 
             if String.IsNullOrWhiteSpace block then
                 blocks
@@ -380,16 +404,9 @@ module MarkdownDocuments =
                 block :: blocks
 
     let private headingPath (stack: (int * string) list) =
-        let path =
-            stack
-            |> List.sortBy fst
-            |> List.map snd
-            |> String.concat " > "
+        let path = stack |> List.sortBy fst |> List.map snd |> String.concat " > "
 
-        if String.IsNullOrWhiteSpace path then
-            None
-        else
-            Some path
+        if String.IsNullOrWhiteSpace path then None else Some path
 
     let readSections path : Async<Result<DocumentChunking.SectionBlocks list, string>> =
         async {
@@ -440,8 +457,7 @@ module MarkdownDocuments =
                         | line :: rest when inFence ->
                             let blockLines = line :: blockLines
                             loop rest stack blockLines sections (not (isFence line))
-                        | line :: rest when isFence line ->
-                            loop rest stack (line :: blockLines) sections true
+                        | line :: rest when isFence line -> loop rest stack (line :: blockLines) sections true
                         | line :: rest ->
                             match tryHeading line with
                             | Some(level, heading) ->

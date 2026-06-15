@@ -1,6 +1,7 @@
 namespace FsColbert
 
 open System
+open System.Text.RegularExpressions
 open System.Threading
 
 type DoclingConversionOptions =
@@ -503,9 +504,83 @@ module DoclingStandardHybrid =
                             pageInputs
         }
 
-type DoclingPassageBlock = { text: string; keywords: string list }
+type DoclingPassageBlock =
+    { text: string
+      sectionPath: string list
+      keywords: string list }
 
 module DoclingPassages =
+    type private SectionState =
+        { title: string option
+          sections: string list }
+
+    let private emptySectionState = { title = None; sections = [] }
+
+    let private numberedHeadingPattern =
+        Regex(@"^\s*(\d+(?:\.\d+)*)\b", RegexOptions.Compiled)
+
+    let private normalizeSectionText text =
+        text
+        |> Text.normalizeWhitespace
+        |> Option.ofObj
+        |> Option.filter (String.IsNullOrWhiteSpace >> not)
+
+    let private currentSectionPath state =
+        [ yield! state.title |> Option.toList; yield! state.sections ]
+
+    let private numberedHeadingParts text =
+        let m = numberedHeadingPattern.Match(defaultArg (Option.ofObj text) "")
+
+        if m.Success then
+            m.Groups[1].Value.Split('.')
+            |> Array.toList
+            |> List.map Int32.TryParse
+            |> List.fold
+                (fun acc parsed ->
+                    match acc, parsed with
+                    | Some values, (true, value) -> Some(values @ [ value ])
+                    | _ -> None)
+                (Some [])
+            |> Option.filter (List.isEmpty >> not)
+        else
+            None
+
+    let private matchingNumberedParents headingParts sections =
+        let parentParts = headingParts |> List.truncate (max 0 (headingParts.Length - 1))
+
+        if List.isEmpty parentParts then
+            []
+        else
+            let currentParents = sections |> List.truncate parentParts.Length
+
+            let currentParentParts = currentParents |> List.choose numberedHeadingParts
+
+            if
+                currentParentParts.Length = parentParts.Length
+                && currentParentParts = (parentParts
+                                         |> List.mapi (fun index _ -> parentParts |> List.truncate (index + 1)))
+            then
+                currentParents
+            else
+                []
+
+    let private updateTitle state text =
+        match normalizeSectionText text with
+        | Some title -> { title = Some title; sections = [] }
+        | None -> state
+
+    let private updateSection state text =
+        match normalizeSectionText text with
+        | None -> state
+        | Some heading ->
+            match numberedHeadingParts heading with
+            | Some parts ->
+                { state with
+                    sections = matchingNumberedParents parts state.sections @ [ heading ] }
+            | None -> { state with sections = [ heading ] }
+
+    let private sectionKeywords sectionPath = sectionPath |> DoclingKeywords.sanitize
+
     let private tableToText (table: DoclingTableItem) =
         if table.data.numRows = 0 || List.isEmpty table.data.tableCells then
             "[Table]"
@@ -535,51 +610,78 @@ module DoclingPassages =
 
     let private normalizeBlock block =
         { text = Text.normalizeWhitespace block.text
+          sectionPath =
+            block.sectionPath
+            |> List.choose normalizeSectionText
+            |> DoclingKeywords.sanitize
           keywords = DoclingKeywords.sanitize block.keywords }
 
-    let private textBlock (item: DoclingTextItem) =
+    let private textBlock sectionPath (item: DoclingTextItem) =
         { text = item.text
-          keywords = DoclingKeywords.weakDefaults item.label [] item.keywords }
+          sectionPath = sectionPath
+          keywords =
+            DoclingKeywords.weakDefaults item.label [] item.keywords
+            @ sectionKeywords sectionPath }
         |> normalizeBlock
 
-    let private tableBlock (item: DoclingTableItem) =
+    let private tableBlock sectionPath (item: DoclingTableItem) =
         { text = tableToText item
-          keywords = DoclingKeywords.weakDefaults item.label [] item.keywords }
+          sectionPath = sectionPath
+          keywords =
+            DoclingKeywords.weakDefaults item.label [] item.keywords
+            @ sectionKeywords sectionPath }
         |> normalizeBlock
 
-    let private pictureBlock (item: DoclingPictureItem) =
+    let private pictureBlock sectionPath (item: DoclingPictureItem) =
         { text = pictureToText item
-          keywords = DoclingKeywords.weakDefaults item.label item.classifications item.keywords }
+          sectionPath = sectionPath
+          keywords =
+            DoclingKeywords.weakDefaults item.label item.classifications item.keywords
+            @ sectionKeywords sectionPath }
         |> normalizeBlock
 
     let toBlocksWithKeywords document =
         let texts =
-            document.texts
-            |> List.map (fun item -> item.selfRef, textBlock item)
-            |> Map.ofList
+            document.texts |> List.map (fun item -> item.selfRef, item) |> Map.ofList
 
         let tables =
-            document.tables
-            |> List.map (fun item -> item.selfRef, tableBlock item)
-            |> Map.ofList
+            document.tables |> List.map (fun item -> item.selfRef, item) |> Map.ofList
 
         let pictures =
-            document.pictures
-            |> List.map (fun item -> item.selfRef, pictureBlock item)
-            |> Map.ofList
+            document.pictures |> List.map (fun item -> item.selfRef, item) |> Map.ofList
+
+        let step (state, blocks) ref =
+            match Map.tryFind ref texts with
+            | Some item ->
+                let state =
+                    match item.label with
+                    | Title -> updateTitle state item.text
+                    | SectionHeader -> updateSection state item.text
+                    | _ -> state
+
+                let sectionPath = currentSectionPath state
+                let block = textBlock sectionPath item
+                state, block :: blocks
+            | None ->
+                let sectionPath = currentSectionPath state
+
+                match Map.tryFind ref tables with
+                | Some item -> state, tableBlock sectionPath item :: blocks
+                | None ->
+                    match Map.tryFind ref pictures with
+                    | Some item -> state, pictureBlock sectionPath item :: blocks
+                    | None -> state, blocks
 
         document.bodyChildren
-        |> List.choose (fun ref ->
-            texts
-            |> Map.tryFind ref
-            |> Option.orElse (Map.tryFind ref tables)
-            |> Option.orElse (Map.tryFind ref pictures))
+        |> List.fold step (emptySectionState, [])
+        |> snd
+        |> List.rev
         |> List.filter (fun block -> not (String.IsNullOrWhiteSpace block.text))
 
     let toBlocks document =
         document |> toBlocksWithKeywords |> List.map _.text
 
-    let private flushChunk currentTexts currentKeywords chunks =
+    let private flushChunk currentTexts currentSectionPath currentKeywords chunks =
         match currentTexts with
         | [] -> chunks
         | _ ->
@@ -590,6 +692,7 @@ module DoclingPassages =
                 chunks
             else
                 { text = text
+                  sectionPath = currentSectionPath
                   keywords = DoclingKeywords.sanitize currentKeywords }
                 :: chunks
 
@@ -598,37 +701,42 @@ module DoclingPassages =
         |> Text.chunkText options
         |> List.map (fun (_, text) ->
             { text = text
+              sectionPath = block.sectionPath
               keywords = block.keywords })
 
     let private chunkBlocksWithKeywords options blocks =
         let maxChars = max 1 options.maxChars
 
-        let rec loop remaining currentTexts currentLen currentKeywords chunks =
+        let rec loop remaining currentTexts currentLen currentSectionPath currentKeywords chunks =
             match remaining with
-            | [] -> flushChunk currentTexts currentKeywords chunks |> List.rev
+            | [] -> flushChunk currentTexts currentSectionPath currentKeywords chunks |> List.rev
             | block :: rest ->
                 let block = normalizeBlock block
 
                 if String.IsNullOrWhiteSpace block.text then
-                    loop rest currentTexts currentLen currentKeywords chunks
+                    loop rest currentTexts currentLen currentSectionPath currentKeywords chunks
+                elif currentLen > 0 && block.sectionPath <> currentSectionPath then
+                    let chunks = flushChunk currentTexts currentSectionPath currentKeywords chunks
+                    loop remaining [] 0 [] [] chunks
                 elif block.text.Length > maxChars then
-                    let chunks = flushChunk currentTexts currentKeywords chunks
+                    let chunks = flushChunk currentTexts currentSectionPath currentKeywords chunks
                     let splitChunks = splitLongBlock options block
-                    loop rest [] 0 [] (List.rev splitChunks @ chunks)
+                    loop rest [] 0 [] [] (List.rev splitChunks @ chunks)
                 elif currentLen = 0 then
-                    loop rest [ block.text ] block.text.Length block.keywords chunks
+                    loop rest [ block.text ] block.text.Length block.sectionPath block.keywords chunks
                 elif currentLen + block.text.Length + 2 > maxChars then
-                    let chunks = flushChunk currentTexts currentKeywords chunks
-                    loop remaining [] 0 [] chunks
+                    let chunks = flushChunk currentTexts currentSectionPath currentKeywords chunks
+                    loop remaining [] 0 [] [] chunks
                 else
                     loop
                         rest
                         (block.text :: currentTexts)
                         (currentLen + block.text.Length + 2)
+                        currentSectionPath
                         (currentKeywords @ block.keywords)
                         chunks
 
-        loop blocks [] 0 [] []
+        loop blocks [] 0 [] [] []
 
     let toPassages (chunkOptions: ChunkOptions) (source: PassageSource) document =
         document
@@ -640,4 +748,5 @@ module DoclingPassages =
               sourceLocation = source.location
               index = index
               text = block.text
+              sectionPath = block.sectionPath
               keywords = block.keywords })

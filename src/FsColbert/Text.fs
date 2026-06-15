@@ -89,6 +89,7 @@ module Text =
               sourceLocation = source.location
               index = index
               text = text
+              sectionPath = []
               keywords = [] })
 
     let passagesFromChunks (source: PreChunkedDocument) : PassageRef list =
@@ -99,4 +100,5 @@ module Text =
               sourceLocation = source.location
               index = index
               text = text
+              sectionPath = []
               keywords = [] })

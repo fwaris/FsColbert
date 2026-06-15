@@ -22,12 +22,25 @@ let private passageWithKeywords sourceId index text keywords embedding =
           sourceLocation = $"/tmp/{sourceId}.pdf"
           index = index
           text = text
+          sectionPath = []
           keywords = keywords }
       embedding = embedding
       terms = Text.terms text }
 
 let private passage sourceId index text embedding =
     passageWithKeywords sourceId index text [] embedding
+
+let private passageWithSection sourceId index text sectionPath keywords embedding =
+    { reference =
+        { sourceId = sourceId
+          sourceDisplayName = $"PDF: {sourceId}"
+          sourceLocation = $"/tmp/{sourceId}.pdf"
+          index = index
+          text = text
+          sectionPath = sectionPath
+          keywords = keywords }
+      embedding = embedding
+      terms = Text.terms text }
 
 type private StaticKeywordGenerator(results: PassageKeywordResult list) =
     interface IPassageKeywordGenerator with
@@ -123,6 +136,42 @@ let private writeVersion2Index path (idx: ColbertIndex) =
 
     writeTfidf writer idx.tfidf
 
+let private writeStringList (writer: BinaryWriter) (values: string list) =
+    writer.Write values.Length
+
+    for value in values do
+        writer.Write value
+
+let private writeVersion3Index path (idx: ColbertIndex) =
+    use stream = File.Create path
+    use writer = new BinaryWriter(stream)
+    writer.Write "FSCOLBERT-IDX"
+    writer.Write 3
+    writeConfig writer idx.config
+    writer.Write idx.chunkOptions.maxChars
+    writer.Write idx.chunkOptions.overlapChars
+    writer.Write idx.chunkOptions.minChars
+    writer.Write idx.tfidfOptions.textWeight
+    writer.Write idx.tfidfOptions.keywordWeight
+    writer.Write(idx.createdAt.ToUnixTimeMilliseconds())
+    writer.Write idx.passages.Length
+
+    for passage in idx.passages do
+        writer.Write passage.reference.sourceId
+        writer.Write passage.reference.sourceDisplayName
+        writer.Write passage.reference.sourceLocation
+        writer.Write passage.reference.index
+        writer.Write passage.reference.text
+        writeStringList writer passage.reference.keywords
+        writer.Write passage.terms.Count
+
+        for term in passage.terms do
+            writer.Write term
+
+        writeVector writer passage.embedding
+
+    writeTfidf writer idx.tfidf
+
 [<Fact>]
 let ``chunkText preserves overlap friendly chunks`` () =
     let options =
@@ -177,6 +226,7 @@ let ``passagesFromBlocks emits bounded section-aware passages`` () =
     Assert.All(passages, fun passage -> Assert.True(passage.text.Length <= options.maxChars))
     Assert.Equal("paper", passages.Head.sourceId)
     Assert.Equal("Paper", passages.Head.sourceDisplayName)
+    Assert.Equal<string list>([ "ABSTRACT" ], passages.Head.sectionPath)
 
 [<Fact>]
 let ``section matching tolerates small spelling mistakes`` () =
@@ -321,6 +371,7 @@ let ``keyword elaboration generator attaches generated terms before tfidf build`
                 sourceLocation = "/tmp/one.md"
                 index = 0
                 text = "benefits waiting period details"
+                sectionPath = []
                 keywords = [] } ]
 
         let generator =
@@ -395,10 +446,11 @@ let ``queryEncodedWithSearchTerms uses supplied terms for candidates but origina
 [<Fact>]
 let ``persistence round trips an index`` () =
     let passage =
-        passageWithKeywords
+        passageWithSection
             "pdf-1"
             0
             "The system indexes local PDF passages."
+            [ "Guide"; "Claims" ]
             [ "insurance claims"; "policy support" ]
             (vector [| 1; 2 |] [| 1.0f; 0.0f; 0.0f; 1.0f |])
 
@@ -413,6 +465,7 @@ let ``persistence round trips an index`` () =
         Assert.Equal(1, loaded.passages.Length)
         Assert.Equal("PDF: pdf-1", loaded.passages.Head.reference.sourceDisplayName)
         Assert.Equal<string list>([ "insurance claims"; "policy support" ], loaded.passages.Head.reference.keywords)
+        Assert.Equal<string list>([ "Guide"; "Claims" ], loaded.passages.Head.reference.sectionPath)
         Assert.Equal(TfidfOptions.defaults.keywordWeight, loaded.tfidfOptions.keywordWeight)
         Assert.Equal<float32 array>(passage.embedding.vectors, loaded.passages.Head.embedding.vectors)
         Assert.Equal(1, loaded.tfidf.passageCount)
@@ -442,9 +495,34 @@ let ``persistence loads version 2 indexes with empty keywords`` () =
 
         Assert.Equal(1, loaded.passages.Length)
         Assert.Empty loaded.passages.Head.reference.keywords
+        Assert.Empty loaded.passages.Head.reference.sectionPath
         Assert.Equal(TfidfOptions.defaults.textWeight, loaded.tfidfOptions.textWeight)
         Assert.Equal(TfidfOptions.defaults.keywordWeight, loaded.tfidfOptions.keywordWeight)
         Assert.True(loaded.tfidf.vocabulary.ContainsKey "prior")
+    finally
+        if IO.File.Exists path then
+            IO.File.Delete path
+
+[<Fact>]
+let ``persistence loads version 3 indexes with empty section path`` () =
+    let oldIndex =
+        index
+            [ passageWithKeywords
+                  "old-pdf"
+                  0
+                  "The version three index format had text and keywords."
+                  [ "legacy keyword" ]
+                  (vector [| 1; 2 |] [| 1.0f; 0.0f; 0.0f; 1.0f |]) ]
+
+    let path = IO.Path.Combine(IO.Path.GetTempPath(), $"{Guid.NewGuid():N}.fsci")
+
+    try
+        writeVersion3Index path oldIndex
+        let loaded = IndexPersistence.load path
+
+        Assert.Equal<string list>([ "legacy keyword" ], loaded.passages.Head.reference.keywords)
+        Assert.Empty loaded.passages.Head.reference.sectionPath
+        Assert.True(loaded.tfidf.vocabulary.ContainsKey "legacy")
     finally
         if IO.File.Exists path then
             IO.File.Delete path
@@ -851,6 +929,181 @@ let ``docling passages render body text table rows and picture metadata`` () =
     Assert.Contains("product photo", passages.Head.keywords)
 
 [<Fact>]
+let ``docling passages inherit structured section context`` () =
+    let table =
+        { selfRef = "#/tables/0"
+          parent = "#/body"
+          label = Table
+          contentLayer = Body
+          prov = []
+          keywords = []
+          sourceId = Some "doc"
+          sourceDisplayName = Some "Doc"
+          data =
+            { numRows = 1
+              numCols = 1
+              tableCells =
+                [ { text = "Result row"
+                    bbox = None
+                    startRowOffsetIndex = 0
+                    endRowOffsetIndex = 1
+                    startColOffsetIndex = 0
+                    endColOffsetIndex = 1
+                    rowHeader = false
+                    columnHeader = false
+                    rowSection = false } ] } }
+
+    let picture =
+        { selfRef = "#/pictures/0"
+          parent = "#/body"
+          label = Picture
+          contentLayer = Body
+          prov = []
+          classifications = []
+          keywords = []
+          sourceId = Some "doc"
+          sourceDisplayName = Some "Doc" }
+
+    let textItem selfRef label text =
+        { selfRef = selfRef
+          parent = "#/body"
+          label = label
+          text = text
+          orig = text
+          contentLayer = Body
+          prov = []
+          keywords = []
+          sourceId = Some "doc"
+          sourceDisplayName = Some "Doc" }
+
+    let document =
+        { name = "doc"
+          originFileName = None
+          originMimeType = None
+          pages =
+            [ 1,
+              { pageNo = 1
+                size = { width = 100.0; height = 100.0 } } ]
+            |> Map.ofList
+          texts =
+            [ textItem "#/texts/0" Title "A-Mem: Agentic Memory for LLM Agents"
+              textItem "#/texts/1" SectionHeader "4 Experiment"
+              textItem "#/texts/2" Text "Dataset description."
+              textItem "#/texts/3" SectionHeader "4.3 Empirical Results"
+              textItem "#/texts/4" Text "Performance analysis without repeating the heading."
+              textItem "#/texts/5" SectionHeader "Limitations"
+              textItem "#/texts/6" Text "Model sensitivity discussion." ]
+          tables = [ table ]
+          pictures = [ picture ]
+          bodyChildren =
+            [ "#/texts/0"
+              "#/texts/1"
+              "#/texts/2"
+              "#/texts/3"
+              "#/texts/4"
+              "#/tables/0"
+              "#/pictures/0"
+              "#/texts/5"
+              "#/texts/6" ]
+          furnitureChildren = [] }
+
+    let source = PassageSource.create "doc" "Doc" "/tmp/doc.pdf"
+
+    let passages =
+        DoclingPassages.toPassages ChunkOptions.fsKameDefaults source document
+
+    let empirical =
+        passages
+        |> List.find (fun passage -> passage.text.Contains("Performance analysis"))
+
+    Assert.Equal<string list>(
+        [ "A-Mem: Agentic Memory for LLM Agents"
+          "4 Experiment"
+          "4.3 Empirical Results" ],
+        empirical.sectionPath
+    )
+
+    Assert.Contains("4.3 Empirical Results", empirical.keywords)
+
+    let tablePassage =
+        passages |> List.find (fun passage -> passage.text.Contains("Result row"))
+
+    Assert.Equal<string list>(empirical.sectionPath, tablePassage.sectionPath)
+
+    let limitations =
+        passages
+        |> List.find (fun passage -> passage.text.Contains("Model sensitivity"))
+
+    Assert.Equal<string list>([ "A-Mem: Agentic Memory for LLM Agents"; "Limitations" ], limitations.sectionPath)
+
+[<Fact>]
+let ``docling numbered heading jumps do not inherit unrelated parents`` () =
+    let textItem selfRef label text =
+        { selfRef = selfRef
+          parent = "#/body"
+          label = label
+          text = text
+          orig = text
+          contentLayer = Body
+          prov = []
+          keywords = []
+          sourceId = Some "doc"
+          sourceDisplayName = Some "Doc" }
+
+    let document: DoclingDocument =
+        { name = "doc"
+          originFileName = None
+          originMimeType = None
+          pages =
+            [ 1,
+              { pageNo = 1
+                size = { width = 100.0; height = 100.0 } } ]
+            |> Map.ofList
+          texts =
+            [ textItem "#/texts/0" Title "AI on the Pulse"
+              textItem "#/texts/1" SectionHeader "1 INTRODUCTION"
+              textItem "#/texts/2" Text "Introductory body."
+              textItem "#/texts/3" SectionHeader "4.3 Experimental Setup"
+              textItem "#/texts/4" Text "Experimental body." ]
+          tables = []
+          pictures = []
+          bodyChildren = [ "#/texts/0"; "#/texts/1"; "#/texts/2"; "#/texts/3"; "#/texts/4" ]
+          furnitureChildren = [] }
+
+    let source = PassageSource.create "doc" "Doc" "/tmp/doc.pdf"
+
+    let passages =
+        DoclingPassages.toPassages ChunkOptions.fsKameDefaults source document
+
+    let experimental =
+        passages
+        |> List.find (fun passage -> passage.text.Contains("Experimental body."))
+
+    Assert.Equal<string list>([ "AI on the Pulse"; "4.3 Experimental Setup" ], experimental.sectionPath)
+
+[<Fact>]
+let ``section path keywords participate in tfidf retrieval`` () =
+    let idx =
+        index
+            [ passageWithSection
+                  "doc"
+                  0
+                  "Performance analysis without repeating the heading."
+                  [ "A-Mem: Agentic Memory for LLM Agents"
+                    "4 Experiment"
+                    "4.3 Empirical Results" ]
+                  [ "A-Mem: Agentic Memory for LLM Agents"
+                    "4 Experiment"
+                    "4.3 Empirical Results" ]
+                  (vector [| 1 |] [| 1.0f; 0.0f |]) ]
+
+    let candidates =
+        Tfidf.scoreQuery idx.tfidf "empirical results" |> Tfidf.topCandidates 10
+
+    Assert.Single candidates |> ignore
+    Assert.Equal(0, fst candidates[0])
+
+[<Fact>]
 let ``docling derived keywords survive index persistence`` () =
     let source = PassageSource.create "doc" "Doc" "/tmp/doc.json"
 
@@ -896,6 +1149,7 @@ let ``docling derived keywords survive index persistence`` () =
         let loaded = IndexPersistence.load path
 
         Assert.Equal<string list>([ "orthodontia"; "waiting period" ], loaded.passages.Head.reference.keywords)
+        Assert.Empty loaded.passages.Head.reference.sectionPath
         Assert.True(loaded.tfidf.vocabulary.ContainsKey "orthodontia")
     finally
         if IO.File.Exists path then

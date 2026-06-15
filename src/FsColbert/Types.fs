@@ -134,6 +134,7 @@ type PassageRef =
       sourceLocation: string
       index: int
       text: string
+      sectionPath: string list
       keywords: string list }
 
 type PassageKeywordResult =

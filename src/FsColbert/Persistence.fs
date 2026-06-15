@@ -6,7 +6,7 @@ open System.IO
 
 module IndexPersistence =
     let private magic = "FSCOLBERT-IDX"
-    let private version = 3
+    let private version = 4
     let private minimumReadableVersion = 2
 
     let private writeConfig (writer: BinaryWriter) (config: EncoderConfig) =
@@ -171,6 +171,7 @@ module IndexPersistence =
             writer.Write passage.reference.index
             writer.Write passage.reference.text
             writeStringList writer passage.reference.keywords
+            writeStringList writer passage.reference.sectionPath
             writer.Write passage.terms.Count
 
             for term in passage.terms do
@@ -217,11 +218,9 @@ module IndexPersistence =
                   let index = reader.ReadInt32()
                   let text = reader.ReadString()
 
-                  let keywords =
-                      if fileVersion >= 3 then
-                          readStringList reader
-                      else
-                          []
+                  let keywords = if fileVersion >= 3 then readStringList reader else []
+
+                  let sectionPath = if fileVersion >= 4 then readStringList reader else []
 
                   let reference =
                       { sourceId = sourceId
@@ -229,6 +228,7 @@ module IndexPersistence =
                         sourceLocation = sourceLocation
                         index = index
                         text = text
+                        sectionPath = sectionPath
                         keywords = keywords }
 
                   let terms =
