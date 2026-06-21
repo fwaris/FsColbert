@@ -2,6 +2,7 @@ module FsColbert.Tests
 
 open System
 open System.IO
+open System.Net.Http
 open System.Numerics
 open System.Threading
 open FsColbert
@@ -81,6 +82,12 @@ type private StaticKeywordGenerator(results: PassageKeywordResult list) =
                     results
                     |> List.filter (fun result -> Set.contains (result.sourceId, result.passageIndex) requested)
             }
+
+type private FailingHttpMessageHandler() =
+    inherit HttpMessageHandler()
+
+    override _.SendAsync(_: HttpRequestMessage, _: CancellationToken) =
+        raise (InvalidOperationException "HTTP should not be used when model files are available locally.")
 
 let private index passages =
     { config = EncoderConfig.mxbaiEdgeColbert
@@ -1584,3 +1591,77 @@ let ``docling model catalog exposes layout and figure manifests`` () =
     )
 
     Assert.EndsWith("/config.json", ModelCatalog.doclingDocumentFigureClassifierV25Onnx.configUrl)
+
+let private writeModelManifestFiles folder (manifest: ModelManifest) =
+    IO.Directory.CreateDirectory folder |> ignore
+    IO.File.WriteAllText(IO.Path.Combine(folder, manifest.modelFileName), "model")
+    IO.File.WriteAllText(IO.Path.Combine(folder, manifest.tokenizerFileName), "tokenizer")
+    IO.File.WriteAllText(IO.Path.Combine(folder, manifest.configFileName), "{}")
+
+[<Fact>]
+let ``model catalog resolves local model files from complete candidate folder`` () =
+    let root =
+        IO.Path.Combine(IO.Path.GetTempPath(), $"fscolbert-model-local-{Guid.NewGuid():N}")
+
+    try
+        let incomplete = IO.Path.Combine(root, "incomplete")
+        let complete = IO.Path.Combine(root, "complete")
+
+        IO.Directory.CreateDirectory incomplete |> ignore
+        IO.File.WriteAllText(IO.Path.Combine(incomplete, ModelCatalog.mxbaiEdgeColbertInt8.modelFileName), "model")
+
+        writeModelManifestFiles complete ModelCatalog.mxbaiEdgeColbertInt8
+
+        match ModelCatalog.tryResolveLocalFiles [ incomplete; complete ] ModelCatalog.mxbaiEdgeColbertInt8 with
+        | None -> failwith "Expected local model files to resolve."
+        | Some files ->
+            Assert.Equal(IO.Path.Combine(complete, ModelCatalog.mxbaiEdgeColbertInt8.modelFileName), files.modelPath)
+
+            Assert.Equal(
+                IO.Path.Combine(complete, ModelCatalog.mxbaiEdgeColbertInt8.tokenizerFileName),
+                files.tokenizerPath
+            )
+
+            Assert.Equal(
+                Some(IO.Path.Combine(complete, ModelCatalog.mxbaiEdgeColbertInt8.configFileName)),
+                files.configPath
+            )
+    finally
+        if IO.Directory.Exists root then
+            IO.Directory.Delete(root, true)
+
+[<Fact>]
+let ``model catalog ignores incomplete local model folder`` () =
+    let folder =
+        IO.Path.Combine(IO.Path.GetTempPath(), $"fscolbert-model-incomplete-{Guid.NewGuid():N}")
+
+    try
+        IO.Directory.CreateDirectory folder |> ignore
+        IO.File.WriteAllText(IO.Path.Combine(folder, ModelCatalog.mxbaiEdgeColbertInt8.modelFileName), "model")
+
+        Assert.True((ModelCatalog.tryResolveLocalFiles [ folder ] ModelCatalog.mxbaiEdgeColbertInt8).IsNone)
+    finally
+        if IO.Directory.Exists folder then
+            IO.Directory.Delete(folder, true)
+
+[<Fact>]
+let ``model catalog ensure available avoids HTTP when local files exist`` () =
+    let root =
+        IO.Path.Combine(IO.Path.GetTempPath(), $"fscolbert-model-available-{Guid.NewGuid():N}")
+
+    try
+        let localFolder = IO.Path.Combine(root, "local")
+        let downloadFolder = IO.Path.Combine(root, "download")
+        writeModelManifestFiles localFolder ModelCatalog.mxbaiEdgeColbertInt8
+
+        use client = new HttpClient(new FailingHttpMessageHandler())
+
+        let files =
+            ModelCatalog.ensureAvailableAsync client downloadFolder [ localFolder ] ModelCatalog.mxbaiEdgeColbertInt8
+            |> Async.RunSynchronously
+
+        Assert.Equal(IO.Path.Combine(localFolder, ModelCatalog.mxbaiEdgeColbertInt8.modelFileName), files.modelPath)
+        Assert.False(IO.Directory.Exists downloadFolder)
+    finally
+        if IO.Directory.Exists root then
+            IO.Directory.Delete(root, true)

@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <FsColbertMxbaiEdgeColbertInt8ModelId>lightonai/mxbai-edge-colbert-v0-32m-onnx:int8</FsColbertMxbaiEdgeColbertInt8ModelId>
+    <FsColbertMxbaiEdgeColbertInt8PackageAssetDirectory Condition="'$(FsColbertMxbaiEdgeColbertInt8PackageAssetDirectory)' == ''">$(MSBuildThisFileDirectory)../contentFiles/any/any/FsColbert/Models/mxbai-edge-colbert/</FsColbertMxbaiEdgeColbertInt8PackageAssetDirectory>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,34 @@
+{
+  "schema_name": "FsColbertModelPackageManifest",
+  "schema_version": "1.0",
+  "package_id": "FsColbert.Models.MxbaiEdgeColbertV0_32M.Onnx.Int8",
+  "model_id": "lightonai/mxbai-edge-colbert-v0-32m-onnx:int8",
+  "asset_path": "FsColbert/Models/mxbai-edge-colbert",
+  "source": {
+    "repository": "https://huggingface.co/lightonai/mxbai-edge-colbert-v0-32m-onnx",
+    "commit": "149441b7fd4f7a85cd73f050a4216f9fb96132a3",
+    "license": "MIT"
+  },
+  "upstream_model": {
+    "repository": "https://huggingface.co/mixedbread-ai/mxbai-edge-colbert-v0-32m",
+    "commit": "963e23afa1478d8bcc12e5d7115adcfdbd22c3af",
+    "license": "Apache-2.0"
+  },
+  "files": [
+    {
+      "file_name": "model_int8.onnx",
+      "size_bytes": 33208906,
+      "sha256": "264ba680e960af9fffb4f78c3af1e4ff92520678b8e136c79434d88fb2549e1b"
+    },
+    {
+      "file_name": "tokenizer.json",
+      "size_bytes": 3583588,
+      "sha256": "594291000b476c98ed600cbb1914ff128c79642a9433aac86213c7a5562d7c1a"
+    },
+    {
+      "file_name": "onnx_config.json",
+      "size_bytes": 803,
+      "sha256": "e10f017e4a8355f6b15f5be5f67295c90d5b25e487568bf0b0d9ee3259dc0eb7"
+    }
+  ]
+}

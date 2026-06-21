@@ -1,0 +1,15 @@
+<Project>
+  <ItemGroup Condition="'$(UseMaui)' == 'true'">
+    <MauiAsset Include="$(FsColbertMxbaiEdgeColbertInt8PackageAssetDirectory)**/*"
+               LogicalName="FsColbert/Models/mxbai-edge-colbert/%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UseMaui)' != 'true'">
+    <Content Include="$(FsColbertMxbaiEdgeColbertInt8PackageAssetDirectory)**/*"
+             Link="FsColbert/Models/mxbai-edge-colbert/%(RecursiveDir)%(Filename)%(Extension)"
+             TargetPath="FsColbert/Models/mxbai-edge-colbert/%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             Visible="false" />
+  </ItemGroup>
+</Project>

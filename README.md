@@ -26,6 +26,10 @@ storage, source selection, OCR/rasterization providers, and any user-facing life
 - .NET SDK with `net10.0` support.
 - ONNX Runtime-compatible target platform.
 - Network access when using `ModelCatalog.ensureDownloadedAsync` to fetch model files.
+  Apps that cannot access Hugging Face at runtime can reference
+  `FsColbert.Models.MxbaiEdgeColbertV0_32M.Onnx.Int8` and use
+  `ModelCatalog.ensureAvailableAsync` to resolve packaged files before falling
+  back to download.
 
 Key package dependencies are:
 

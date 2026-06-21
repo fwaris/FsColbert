@@ -62,6 +62,25 @@ module ModelCatalog =
                 do! source.CopyToAsync target |> Async.AwaitTask
         }
 
+    let tryResolveLocalFiles (candidateFolders: string seq) (manifest: ModelManifest) =
+        let tryResolveFromFolder folder =
+            if String.IsNullOrWhiteSpace folder then
+                None
+            else
+                let modelPath = Path.Combine(folder, manifest.modelFileName)
+                let tokenizerPath = Path.Combine(folder, manifest.tokenizerFileName)
+                let configPath = Path.Combine(folder, manifest.configFileName)
+
+                if File.Exists modelPath && File.Exists tokenizerPath && File.Exists configPath then
+                    Some
+                        { modelPath = modelPath
+                          tokenizerPath = tokenizerPath
+                          configPath = Some configPath }
+                else
+                    None
+
+        candidateFolders |> Seq.tryPick tryResolveFromFolder
+
     let ensureDownloadedAsync (client: HttpClient) (folder: string) (manifest: ModelManifest) =
         async {
             Directory.CreateDirectory folder |> ignore
@@ -78,6 +97,18 @@ module ModelCatalog =
                 { modelPath = modelPath
                   tokenizerPath = tokenizerPath
                   configPath = Some configPath }
+        }
+
+    let ensureAvailableAsync
+        (client: HttpClient)
+        (downloadFolder: string)
+        (candidateFolders: string seq)
+        (manifest: ModelManifest)
+        =
+        async {
+            match tryResolveLocalFiles candidateFolders manifest with
+            | Some files -> return files
+            | None -> return! ensureDownloadedAsync client downloadFolder manifest
         }
 
     let ensureDoclingOnnxDownloadedAsync (client: HttpClient) (folder: string) (manifest: DoclingOnnxModelManifest) =

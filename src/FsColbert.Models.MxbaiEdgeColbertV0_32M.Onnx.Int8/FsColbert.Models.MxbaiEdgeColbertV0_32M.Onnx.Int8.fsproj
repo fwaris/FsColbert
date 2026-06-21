@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <PackageId>FsColbert.Models.MxbaiEdgeColbertV0_32M.Onnx.Int8</PackageId>
+    <Description>Optional packaged int8 ONNX model assets for FsColbert's Mxbai Edge ColBERT encoder.</Description>
+    <Authors>Faisal Waris</Authors>
+    <PackageLicenseExpression>MIT AND Apache-2.0</PackageLicenseExpression>
+    <PackageTags>FSharp;ColBERT;Retrieval;ONNX;Model;Mxbai;AI;Search</PackageTags>
+    <PackageProjectUrl>https://github.com/fwaris/FsColbert</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/fwaris/FsColbert</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <None Include="MODEL-MANIFEST.json" Pack="true" PackagePath="\" />
+    <None Include="THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="\" />
+    <None Include="licenses\**\*" Pack="true" PackagePath="licenses\%(RecursiveDir)%(Filename)%(Extension)" />
+    <None Include="buildTransitive\$(PackageId).props" Pack="true" PackagePath="buildTransitive\$(PackageId).props" />
+    <None Include="buildTransitive\$(PackageId).targets" Pack="true" PackagePath="buildTransitive\$(PackageId).targets" />
+    <None Include="model\**\*" Pack="true" PackagePath="contentFiles\any\any\FsColbert\Models\mxbai-edge-colbert\%(RecursiveDir)%(Filename)%(Extension)" PackageCopyToOutput="false" PackageFlatten="false" />
+  </ItemGroup>
+
+</Project>

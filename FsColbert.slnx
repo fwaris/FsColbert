@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/FsColbert/FsColbert.fsproj" />
+    <Project Path="src/FsColbert.Models.MxbaiEdgeColbertV0_32M.Onnx.Int8/FsColbert.Models.MxbaiEdgeColbertV0_32M.Onnx.Int8.fsproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/FsColbert.Tests/FsColbert.Tests.fsproj" />
