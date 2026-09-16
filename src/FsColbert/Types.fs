@@ -287,6 +287,7 @@ type ColbertIndex =
 type SearchOptions =
     { maxResults: int
       candidateLimit: int
+      semanticCandidateLimit: int
       denseWeight: float32
       lexicalWeight: float32
       useLexicalFilter: bool
@@ -297,6 +298,7 @@ module SearchOptions =
     let defaults =
         { maxResults = 6
           candidateLimit = 128
+          semanticCandidateLimit = 0
           denseWeight = 1.0f
           lexicalWeight = 0.15f
           useLexicalFilter = true

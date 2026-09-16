@@ -11,7 +11,7 @@ The library currently provides:
 - ONNX Runtime inference for `lightonai/mxbai-edge-colbert-v0-32m-onnx`.
 - Hugging Face byte-level BPE tokenization through `Microsoft.ML.Tokenizers`.
 - Section-aware PDF and Markdown passage extraction.
-- TF-IDF candidate filtering with optional keyword-weighted expansion before dense reranking.
+- Independent TF-IDF and cached semantic-centroid candidate generation before dense reranking.
 - Parallel batch indexing through `FSharp.Control.AsyncSeq`.
 - Binary `.fsci` index persistence and index bundle manifests.
 - Docling-compatible document types, JSON serialization, passage conversion, and a standard hybrid assembly pipeline.
@@ -132,9 +132,29 @@ ChunkOptions.fsKameDefaults
 `OnnxColbertEncoder.Load` also honors `FSCOLBERT_MODEL_REPLICAS` unless a replica
 count is passed explicitly.
 
-Search uses TF-IDF to select candidates, then reranks candidates with ColBERT MaxSim.
-`SearchOptions.defaults` returns up to 6 results, considers up to 128 lexical
-candidates, and uses reciprocal rank fusion with dense and lexical scores.
+Search can union independent TF-IDF and semantic-centroid candidates, then rerank the
+combined set with ColBERT MaxSim. `SearchOptions.defaults` returns up to 6 results,
+considers up to 128 lexical candidates, and uses reciprocal rank fusion with dense
+and lexical scores. Semantic candidates are opt-in so existing applications retain
+their current search behavior:
+
+```fsharp
+let hybridOptions =
+    { SearchOptions.defaults with
+        candidateLimit = 128
+        semanticCandidateLimit = 128
+        denseWeight = 1.0f
+        lexicalWeight = 0.05f }
+
+// Optional: move the one-time centroid construction to application startup.
+Search.prepareSemanticCandidates index
+
+let! hits = Search.query encoder hybridOptions index "phone cannot boot"
+```
+
+The centroid index is cached per loaded `ColbertIndex`. It adds roughly
+`passageCount * embeddingDim * 4` bytes and works with existing `.fsci` files, so
+enabling hybrid candidate generation does not require rebuilding an index.
 
 When an app has query expansion terms, pass them separately so dense scoring still
 uses the original query:

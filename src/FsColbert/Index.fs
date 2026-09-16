@@ -442,20 +442,41 @@ module IndexBuilder =
             cancellationToken
 
 module Search =
-    let private candidatePassages options (index: ColbertIndex) queryText searchTerms =
-        let passages = index.passages |> List.toArray
-
+    let private lexicalScores options (index: ColbertIndex) queryText searchTerms =
         if options.useLexicalFilter then
             Tfidf.scoreQueryWithSearchTerms index.tfidf queryText searchTerms
-            |> Tfidf.topCandidates options.candidateLimit
-            |> Array.choose (fun (ordinal, lexicalScore) ->
+        else
+            [||]
+
+    let private candidatePassages options (index: ColbertIndex) scores queryEmbedding =
+        let passages = index.passages |> List.toArray
+
+        if not options.useLexicalFilter then
+            passages |> Array.map (fun passage -> passage, 0.0f) |> Array.toList
+        else
+            let lexicalCandidates = scores |> Tfidf.topCandidates options.candidateLimit
+
+            let semanticCandidates =
+                if options.semanticCandidateLimit > 0 then
+                    SemanticCandidateIndex.topCandidates options.semanticCandidateLimit index queryEmbedding
+                else
+                    [||]
+
+            let lexicalScoresByOrdinal =
+                scores
+                |> Seq.map (fun (ordinal, score) -> Collections.Generic.KeyValuePair(ordinal, score))
+                |> Collections.Generic.Dictionary
+
+            Seq.append (lexicalCandidates |> Seq.map fst) (semanticCandidates |> Seq.map fst)
+            |> Seq.distinct
+            |> Seq.choose (fun ordinal ->
                 if ordinal >= 0 && ordinal < passages.Length then
-                    Some(passages[ordinal], lexicalScore)
+                    match lexicalScoresByOrdinal.TryGetValue ordinal with
+                    | true, score -> Some(passages[ordinal], score)
+                    | false, _ -> Some(passages[ordinal], 0.0f)
                 else
                     None)
-            |> Array.toList
-        else
-            passages |> Array.map (fun p -> p, 0.0f) |> Array.toList
+            |> Seq.toList
 
     let private reciprocalRankFusion k denseWeight lexicalWeight (hits: SearchHit list) =
         let denseRank =
@@ -466,6 +487,7 @@ module Search =
 
         let lexicalRank =
             hits
+            |> List.filter (fun h -> h.lexicalScore > 0.0f)
             |> List.sortByDescending (fun h -> h.lexicalScore)
             |> List.mapi (fun i h -> h.reference, i + 1)
             |> Map.ofList
@@ -473,11 +495,15 @@ module Search =
         hits
         |> List.map (fun h ->
             let rDense = Map.find h.reference denseRank
-            let rLexical = Map.find h.reference lexicalRank
+
+            let lexicalContribution =
+                lexicalRank
+                |> Map.tryFind h.reference
+                |> Option.map (fun rank -> lexicalWeight * (1.0f / (float32 k + float32 rank)))
+                |> Option.defaultValue 0.0f
 
             let score =
-                denseWeight * (1.0f / (float32 k + float32 rDense))
-                + lexicalWeight * (1.0f / (float32 k + float32 rLexical))
+                denseWeight * (1.0f / (float32 k + float32 rDense)) + lexicalContribution
 
             { h with score = score })
 
@@ -512,7 +538,9 @@ module Search =
         (searchTerms: string seq)
         (queryEmbedding: MultiVector)
         =
-        candidatePassages options index queryText searchTerms
+        let scores = lexicalScores options index queryText searchTerms
+
+        candidatePassages options index scores queryEmbedding
         |> rankCandidates options queryEmbedding
 
     let queryEncoded (options: SearchOptions) (index: ColbertIndex) (queryText: string) (queryEmbedding: MultiVector) =
@@ -526,15 +554,22 @@ module Search =
         (searchTerms: string seq)
         =
         async {
-            let candidates = candidatePassages options index queryText searchTerms
+            let scores = lexicalScores options index queryText searchTerms
 
-            if List.isEmpty candidates then
+            if
+                options.useLexicalFilter
+                && Array.isEmpty scores
+                && options.semanticCandidateLimit <= 0
+            then
                 return []
             else
                 let! encoded = encoder.EncodeQueryAsync queryText
+                let candidates = candidatePassages options index scores encoded.embedding
 
                 return candidates |> rankCandidates options encoded.embedding
         }
+
+    let prepareSemanticCandidates (index: ColbertIndex) = SemanticCandidateIndex.prepare index
 
     let query (encoder: OnnxColbertEncoder) (options: SearchOptions) (index: ColbertIndex) (queryText: string) =
         queryWithSearchTerms encoder options index queryText []

@@ -549,6 +549,72 @@ let ``queryEncodedWithSearchTerms uses supplied terms for candidates but origina
     Assert.Equal("one", expandedHits.Head.reference.sourceId)
 
 [<Fact>]
+let ``semantic candidates recover a dense match outside the lexical shortlist`` () =
+    let idx =
+        index
+            [ passage "lexical" 0 "apple topic" (vector [| 1 |] [| 0.0f; 1.0f |])
+              passage "semantic" 0 "banana topic" (vector [| 1 |] [| 1.0f; 0.0f |]) ]
+
+    let queryEmbedding = vector [| 1 |] [| 1.0f; 0.0f |]
+
+    let lexicalOnly =
+        Search.queryEncoded
+            { SearchOptions.defaults with
+                maxResults = 1
+                candidateLimit = 1
+                semanticCandidateLimit = 0
+                denseWeight = 1.0f
+                lexicalWeight = 0.0f
+                useRRF = false }
+            idx
+            "apple"
+            queryEmbedding
+
+    let hybrid =
+        Search.queryEncoded
+            { SearchOptions.defaults with
+                maxResults = 1
+                candidateLimit = 1
+                semanticCandidateLimit = 1
+                denseWeight = 1.0f
+                lexicalWeight = 0.0f
+                useRRF = false }
+            idx
+            "apple"
+            queryEmbedding
+
+    Assert.Equal("lexical", lexicalOnly.Head.reference.sourceId)
+    Assert.Equal("semantic", hybrid.Head.reference.sourceId)
+
+[<Fact>]
+let ``semantic-only candidates receive no lexical RRF contribution`` () =
+    let idx =
+        index
+            [ passage "lexical" 0 "apple topic" (vector [| 1 |] [| 0.0f; 1.0f |])
+              passage "semantic-first" 0 "banana topic" (vector [| 1 |] [| 1.0f; 0.0f |])
+              passage "semantic-second" 0 "pear topic" (vector [| 1 |] [| 0.9f; 0.1f |]) ]
+
+    let hits =
+        Search.queryEncoded
+            { SearchOptions.defaults with
+                maxResults = 3
+                candidateLimit = 1
+                semanticCandidateLimit = 2
+                denseWeight = 1.0f
+                lexicalWeight = 1.0f
+                useRRF = true }
+            idx
+            "apple"
+            (vector [| 1 |] [| 1.0f; 0.0f |])
+
+    let semanticHit =
+        hits |> List.find (fun hit -> hit.reference.sourceId = "semantic-first")
+
+    let expectedDenseOnlyScore = 1.0f / 61.0f
+
+    Assert.InRange(semanticHit.score, expectedDenseOnlyScore - 0.000001f, expectedDenseOnlyScore + 0.000001f)
+
+[<Fact>]
 let ``persistence round trips an index`` () =
     let passage =
         passageWithMetadata
